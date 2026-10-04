@@ -1,0 +1,74 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.framework;
+
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+class TimeValueTest extends AbstractFSCrawlerTestCase {
+
+    @Test
+    void timeValueFromString() {
+        Assertions.assertThat(TimeValue.parseTimeValue("500ms").millis()).isEqualTo(500L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1s").millis()).isEqualTo(1000L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1s").seconds()).isEqualTo(1L);
+        Assertions.assertThat(TimeValue.parseTimeValue("10s").seconds()).isEqualTo(10L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1m").seconds()).isEqualTo(60L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1m").minutes()).isEqualTo(1L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1h").minutes()).isEqualTo(60L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1h").hours()).isEqualTo(1L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1d").hours()).isEqualTo(24L);
+        Assertions.assertThat(TimeValue.parseTimeValue("1d").days()).isEqualTo(1L);
+        Assertions.assertThat(TimeValue.parseTimeValue("2d").days()).isEqualTo(2L);
+        Assertions.assertThat(TimeValue.parseTimeValue("30d").days()).isEqualTo(30L);
+    }
+
+    @Test
+    void timeValueToString() {
+        Assertions.assertThat(TimeValue.parseTimeValue("1s")).hasToString("1s");
+        Assertions.assertThat(TimeValue.parseTimeValue("500ms")).hasToString("500ms");
+        Assertions.assertThat(TimeValue.parseTimeValue("10s")).hasToString("10s");
+        Assertions.assertThat(TimeValue.parseTimeValue("1m")).hasToString("1m");
+        Assertions.assertThat(TimeValue.parseTimeValue("70s")).hasToString("1.1m");
+        Assertions.assertThat(TimeValue.parseTimeValue("1h")).hasToString("1h");
+        Assertions.assertThat(TimeValue.parseTimeValue("75m")).hasToString("1.2h");
+        Assertions.assertThat(TimeValue.parseTimeValue("3830s")).hasToString("1h");
+        Assertions.assertThat(TimeValue.parseTimeValue("1d")).hasToString("1d");
+        Assertions.assertThat(TimeValue.parseTimeValue("25h")).hasToString("1d");
+        Assertions.assertThat(TimeValue.parseTimeValue("2d")).hasToString("2d");
+        Assertions.assertThat(TimeValue.parseTimeValue("30d")).hasToString("30d");
+    }
+
+    @Test
+    void stringConstructorParsesValues() {
+        Assertions.assertThat(new TimeValue("15m").minutes()).isEqualTo(15L);
+        Assertions.assertThat(new TimeValue("5s").millis()).isEqualTo(5000L);
+        Assertions.assertThat(new TimeValue("500ms").millis()).isEqualTo(500L);
+    }
+
+    @Test
+    void stringConstructorRejectsNull() {
+        Assertions.assertThatThrownBy(() -> new TimeValue((String) null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("null");
+    }
+}

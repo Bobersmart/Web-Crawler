@@ -1,0 +1,128 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.plugins.fs.local;
+
+import fr.pilato.elasticsearch.crawler.fs.beans.Doc;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.framework.OsValidator;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettingsLoader;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerExtensionFsProvider;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+import org.apache.commons.io.IOUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+class FsLocalPluginIT extends AbstractFSCrawlerTestCase {
+    private static final Logger logger = LogManager.getLogger();
+
+    private Path createFile(String objectName, String object) throws IOException {
+        return createFile(testTmpDir, objectName, object);
+    }
+
+    private static Path createFile(Path dir, String objectName, String object) throws IOException {
+        logger.info("Create fake content [{}] in [{}]; [{}]", objectName, dir, object);
+        Path file = dir.resolve(objectName);
+        Files.writeString(file, object);
+        return file;
+    }
+
+    @Test
+    void readFileWithFullPath() throws Exception {
+        String text = "Hello Foo world!";
+        Path fileName = createFile("foo.txt", text);
+        createFile("bar.txt", "This one should be ignored.");
+
+        logger.info("Starting Test with bucket [{}]", fileName);
+        try (FsCrawlerExtensionFsProvider provider = new FsLocalPlugin.FsCrawlerExtensionFsProviderLocal()) {
+            FsSettings fsSettings = FsSettingsLoader.load();
+            fsSettings.getFs().setUrl(testTmpDir.toString());
+            provider.start(fsSettings, Map.of("url", fileName.toString()));
+            InputStream inputStream = provider.readFile();
+            String object = IOUtils.toString(inputStream, StandardCharsets.UTF_8);
+            Assertions.assertThat(object).isEqualTo(text);
+            Doc doc = provider.createDocument();
+            Assertions.assertThat(doc.getFile().getFilename()).isEqualTo("foo.txt");
+            Assertions.assertThat(doc.getFile().getFilesize()).isEqualTo(16L);
+            if (OsValidator.WINDOWS) {
+                Assertions.assertThat(doc.getPath().getVirtual()).isEqualTo("\\");
+            } else {
+                Assertions.assertThat(doc.getPath().getVirtual()).isEqualTo("/");
+            }
+            Assertions.assertThat(doc.getPath().getReal())
+                    .isEqualTo(fileName.toAbsolutePath().toString());
+        }
+    }
+
+    @Test
+    void readFileWithRelativePath() throws Exception {
+        String text = "Hello Foo world!";
+        Path fileName = createFile("foo.txt", text);
+
+        logger.info("Starting Test with bucket [{}]", fileName);
+        try (FsCrawlerExtensionFsProvider provider = new FsLocalPlugin.FsCrawlerExtensionFsProviderLocal()) {
+            FsSettings fsSettings = FsSettingsLoader.load();
+            fsSettings.getFs().setUrl(testTmpDir.toString());
+            provider.start(fsSettings, Map.of("url", "foo.txt"));
+            InputStream inputStream = provider.readFile();
+            String object = IOUtils.toString(inputStream, StandardCharsets.UTF_8);
+            Assertions.assertThat(object).isEqualTo(text);
+            Doc doc = provider.createDocument();
+            Assertions.assertThat(doc.getFile().getFilename()).isEqualTo("foo.txt");
+            Assertions.assertThat(doc.getFile().getFilesize()).isEqualTo(16L);
+            if (OsValidator.WINDOWS) {
+                Assertions.assertThat(doc.getPath().getVirtual()).isEqualTo("\\");
+            } else {
+                Assertions.assertThat(doc.getPath().getVirtual()).isEqualTo("/");
+            }
+            Assertions.assertThat(doc.getPath().getReal())
+                    .isEqualTo(fileName.toAbsolutePath().toString());
+        }
+    }
+
+    @Test
+    void readFileWithFullPathOutsideRootDir() throws Exception {
+        Path rootDir = testTmpDir.resolve("root-dir");
+        Files.createDirectories(rootDir);
+        Path outsideRootDir = testTmpDir.resolve("outside-root-dir");
+        Files.createDirectories(outsideRootDir);
+
+        String text = "Hello Foo world!";
+        Path fileName = createFile(outsideRootDir, "foo.txt", text);
+
+        logger.info("Starting Test with bucket [{}]", fileName);
+        try (FsCrawlerExtensionFsProvider provider = new FsLocalPlugin.FsCrawlerExtensionFsProviderLocal()) {
+            FsSettings fsSettings = FsSettingsLoader.load();
+            fsSettings.getFs().setUrl(rootDir.toString());
+            Assertions.assertThatThrownBy(() -> provider.start(fsSettings, Map.of("url", fileName.toString())))
+                    .isInstanceOf(FsCrawlerIllegalConfigurationException.class)
+                    .hasMessageContaining("is not within");
+        }
+    }
+}

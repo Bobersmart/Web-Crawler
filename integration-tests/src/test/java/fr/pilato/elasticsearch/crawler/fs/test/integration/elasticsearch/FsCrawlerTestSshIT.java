@@ -1,0 +1,161 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.test.integration.elasticsearch;
+
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchRequest;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchResponse;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.TimeValue;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.test.integration.AbstractFsCrawlerITCase;
+import fr.pilato.elasticsearch.crawler.plugins.fs.ssh.SshTestHelper;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
+import java.nio.file.Path;
+import java.security.NoSuchAlgorithmException;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.sshd.server.SshServer;
+import org.apache.sshd.server.config.keys.AuthorizedKeysAuthenticator;
+import org.apache.sshd.server.keyprovider.SimpleGeneratorHostKeyProvider;
+import org.apache.sshd.sftp.server.SftpFileSystemAccessor;
+import org.apache.sshd.sftp.server.SftpSubsystemFactory;
+import org.apache.sshd.sftp.server.SftpSubsystemProxy;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+
+/** Test crawler with SSH */
+class FsCrawlerTestSshIT extends AbstractFsCrawlerITCase {
+    private static final Logger logger = LogManager.getLogger();
+    private static final String SSH_USERNAME = "USERNAME";
+    private static final String SSH_PASSWORD = "PASSWORD";
+
+    private SshServer sshd = null;
+    private Path sshKeyDir;
+
+    @BeforeEach
+    void setup() throws IOException, NoSuchAlgorithmException {
+        SftpSubsystemFactory factory = new SftpSubsystemFactory.Builder()
+                .withFileSystemAccessor(new SftpFileSystemAccessor() {
+                    @Override
+                    public Path resolveLocalFilePath(SftpSubsystemProxy subsystem, Path rootDir, String remotePath)
+                            throws InvalidPathException {
+                        String path = remotePath;
+                        if (remotePath.startsWith("/")) {
+                            path = remotePath.substring(1);
+                        }
+                        return currentTestResourceDir.resolve(path);
+                    }
+                })
+                .build();
+
+        // Generate the key files for our SSH tests in a dedicated directory outside the crawled path
+        sshKeyDir = Files.createDirectories(rootTmpDir.resolve(jobName + "-ssh-keys"));
+        SshTestHelper.generateAndSaveKeyPair(sshKeyDir);
+
+        sshd = SshServer.setUpDefaultServer();
+        sshd.setHost("localhost");
+        sshd.setKeyPairProvider(new SimpleGeneratorHostKeyProvider(sshKeyDir.resolve("host.ser")));
+        sshd.setPasswordAuthenticator(
+                (username, password, session) -> SSH_USERNAME.equals(username) && SSH_PASSWORD.equals(password));
+        sshd.setPublickeyAuthenticator(new AuthorizedKeysAuthenticator(sshKeyDir.resolve("public.key")));
+
+        sshd.setSubsystemFactories(Collections.singletonList(factory));
+        sshd.start();
+
+        logger.info(" -> Started fake SSHD service on {}:{}", sshd.getHost(), sshd.getPort());
+    }
+
+    @AfterEach
+    void shutDown() throws IOException {
+        if (sshd != null) {
+            sshd.stop(true);
+            sshd.close();
+            logger.info(" -> Stopped fake SSHD service on {}:{}", sshd.getHost(), sshd.getPort());
+        }
+    }
+
+    @Test
+    void ssh() throws Exception {
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getFs().setUpdateRate(TimeValue.timeValueMinutes(1));
+        configureSsh(fsSettings, null);
+        crawler = startCrawler(fsSettings);
+
+        ESSearchResponse response = countTestHelper(
+                new ESSearchRequest().withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_DOCS), 2L, null);
+        Assertions.assertThat(response.getTotalHits()).isEqualTo(2L);
+    }
+
+    @Test
+    void ssh_with_key() throws Exception {
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getFs().setUpdateRate(TimeValue.timeValueMinutes(1));
+        configureSsh(fsSettings, sshKeyDir.resolve("private.key").toFile().getAbsolutePath());
+        crawler = startCrawler(fsSettings);
+
+        ESSearchResponse response = countTestHelper(
+                new ESSearchRequest().withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_DOCS), 1L, null);
+        Assertions.assertThat(response.getTotalHits()).isEqualTo(1L);
+    }
+
+    /**
+     * Test for #1952: <a
+     * href="https://github.com/dadoonet/fscrawler/issues/1952">https://github.com/dadoonet/fscrawler/issues/1952</a>:
+     * When a directory has a space at the end, files inside are not indexed
+     */
+    @Test
+    @DisabledOnOs(OS.WINDOWS) // Windows does not allow to have a space at the end of a directory name
+    void dir_with_space_at_the_end() throws Exception {
+        Path dirWithSpace = currentTestResourceDir.resolve("with_space ");
+        Files.move(currentTestResourceDir.resolve("with_space"), dirWithSpace);
+
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getFs().setUpdateRate(TimeValue.timeValueMinutes(1));
+        configureSsh(fsSettings, null);
+        crawler = startCrawler(fsSettings);
+        ESSearchResponse response = countTestHelper(
+                new ESSearchRequest().withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_DOCS), 3L, null);
+        Assertions.assertThat(response.getTotalHits()).isEqualTo(3L);
+    }
+
+    private void configureSsh(FsSettings fsSettings, String pemPath) {
+        fsSettings.getFs().setProvider("ssh");
+        fsSettings.getFs().setUrl("/");
+        Map<String, Object> ssh = new LinkedHashMap<>();
+        ssh.put("hostname", sshd.getHost());
+        ssh.put("port", sshd.getPort());
+        ssh.put("username", SSH_USERNAME);
+        ssh.put("password", SSH_PASSWORD);
+        if (pemPath != null) {
+            ssh.put("pem_path", pemPath);
+        }
+        fsSettings.getFs().setProviders(Map.of("ssh", ssh));
+    }
+}

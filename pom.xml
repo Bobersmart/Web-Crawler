@@ -1,0 +1,1353 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>fr.pilato.elasticsearch.crawler</groupId>
+    <artifactId>fscrawler-parent</artifactId>
+    <version>3.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>FSCrawler</name>
+    <description>FS Crawler offers a simple way to index binary files into elasticsearch.</description>
+    <url>https://github.com/dadoonet/fscrawler/</url>
+
+    <licenses>
+        <license>
+            <name>The Apache Software License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <developers>
+        <developer>
+            <id>dadoonet</id>
+            <name>David Pilato</name>
+            <email>david@pilato.fr</email>
+            <url>https://david.pilato.fr/</url>
+            <timezone>+1</timezone>
+        </developer>
+    </developers>
+
+    <modules>
+        <module>framework</module>
+        <module>test-framework</module>
+        <module>settings</module>
+        <module>test-documents</module>
+        <module>beans</module>
+        <module>plugin</module>
+        <module>elasticsearch-client</module>
+        <module>kibana-client</module>
+        <module>core</module>
+        <module>plugins</module>
+        <module>integration-tests</module>
+        <module>distribution</module>
+        <module>cli</module>
+        <module>tika</module>
+        <module>rest</module>
+        <module>docs</module>
+        <module>contrib</module>
+    </modules>
+
+    <scm>
+        <connection>scm:git:git@github.com:dadoonet/fscrawler.git</connection>
+        <developerConnection>scm:git:git@github.com:dadoonet/fscrawler.git</developerConnection>
+        <url>scm:git:git@github.com:dadoonet/fscrawler.git</url>
+    </scm>
+
+    <issueManagement>
+        <system>GitHub</system>
+        <url>https://github.com/dadoonet/fscrawler/issues/</url>
+    </issueManagement>
+
+    <!--suppress CheckTagEmptyBody -->
+    <properties>
+        <elasticsearch9.version>9.5.2</elasticsearch9.version>
+        <elasticsearch8.version>8.19.5</elasticsearch8.version>
+        <elasticsearch7.version>7.17.29</elasticsearch7.version>
+        <elasticsearch.version>9.5.4</elasticsearch.version>
+
+        <pl4j.version>3.16.0</pl4j.version>
+
+        <gestalt.version>0.38.1</gestalt.version>
+        <snakeyaml.version>2.7</snakeyaml.version>
+
+        <tika.version>4.0.0</tika.version>
+        <jackson.version>3.2.3</jackson.version>
+        <!--
+            Jackson 2.x is still pulled transitively by Tika (jackson-databind). Pin it to a patched
+            release (2.22.0 is outside the vulnerable range of CVE-2026-54512 / CVE-2026-54513, fixed in
+            2.21.4) via the jackson-bom import below. Also used by the Spotless plugin (its own classpath).
+        -->
+        <jackson2.version>2.22.3</jackson2.version>
+        <jsonpath.version>3.0.0</jsonpath.version>
+        <log4j.version>2.26.1</log4j.version>
+        <jersey.version>4.0.2</jersey.version>
+        <httpcore5.version>5.4.4</httpcore5.version>
+        <httpclient5.version>5.6.4</httpclient5.version>
+        <jsoup.version>1.23.2</jsoup.version>
+        <!-- Because of CVE-2024-29857 - this comes from Tika 2.9.2.
+             Keep the whole BC jdk18on family aligned: mixing versions
+             (e.g. bcprov 1.85 + bcutil 1.84) breaks provider init. -->
+        <bouncycastle.version>1.86</bouncycastle.version>
+
+        <!-- For FSCrawler S3 plugin -->
+        <minio.version>9.0.3</minio.version>
+
+        <!-- Tests -->
+        <junit.version>6.1.3</junit.version>
+        <randomizedtesting.version>0.4.0</randomizedtesting.version>
+        <mockito.version>5.24.0</mockito.version>
+
+        <!-- Non Apache2 Compatible licenses -->
+        <imageio.version>3.0.3</imageio.version>
+        <jpeg.version>1.4.0</jpeg.version>
+
+        <!-- To skip Tests -->
+        <skipTests>false</skipTests>
+        <skipUnitTests>${skipTests}</skipUnitTests>
+        <skipIntegTests>${skipTests}</skipIntegTests>
+
+        <!-- For integration tests using Docker Compose or external cluster -->
+        <contrib.dir>${project.basedir}/contrib</contrib.dir>
+        <integ.elasticsearch.version>${elasticsearch.version}</integ.elasticsearch.version>
+        <integ.elasticsearch.port>9200</integ.elasticsearch.port>
+        <tests.cluster.url/>
+        <tests.cluster.apiKey/>
+        <tests.cluster.check_ssl>true</tests.cluster.check_ssl>
+        <tests.kibana.url/>
+        <tests.index.prefix/>
+        <tests.rest.port>0</tests.rest.port>
+        <testcontainers.version>2.0.5</testcontainers.version>
+
+        <!-- Randomized testing framework -->
+        <tests.locale>random</tests.locale>
+        <tests.timezone>random</tests.timezone>
+        <tests.output>false</tests.output>
+        <tests.leaveTemporary>false</tests.leaveTemporary>
+        <tests.seed/>
+        <!-- Running the tests with Tesseract OCR might take time -->
+        <tests.timeoutSuite>120</tests.timeoutSuite>
+        <tests.timeout>60</tests.timeout>
+
+        <!-- For CVE Audit with Sonatype -->
+        <env.SONATYPE_USER/>
+        <env.SONATYPE_PASS/>
+        <sonatype.username>${env.SONATYPE_USER}</sonatype.username>
+        <sonatype.password>${env.SONATYPE_PASS}</sonatype.password>
+        <ossindex.score>7.0</ossindex.score>
+        <!-- When we need to disable a specific CVE -->
+        <ossindex.exclude/>
+
+        <!-- OpenTelemetry API (instrumentation only; SDK provided by elastic-otel-javaagent at runtime) -->
+        <opentelemetry.version>1.66.0</opentelemetry.version>
+        <!-- Elastic OTel javaagent bundled in distribution/external/ -->
+        <elastic.otel.agent.version>1.12.0</elastic.otel.agent.version>
+
+        <java.compiler.version>17</java.compiler.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+
+        <!-- Floating Docker Hub tags. SNAPSHOT builds must not move latest/noocr;
+             -Prelease (see the release profile) switches these to the stable aliases. -->
+        <docker.ocr.alias.tag>snapshot</docker.ocr.alias.tag>
+        <docker.noocr.alias.tag>snapshot-noocr</docker.noocr.alias.tag>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-framework</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-test-framework</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-test-documents</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-it-common</artifactId>
+                <version>3.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-core</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-settings</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-elasticsearch-client</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-kibana-client</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-elasticsearch-client-base</artifactId>
+                <version>3.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-elasticsearch-client-v7</artifactId>
+                <version>3.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-cli</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-beans</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-crawler</artifactId>
+                <version>3.0-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-tika</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-rest</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+
+            <!-- FSCrawler plugins -->
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-plugins</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-welcome-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-fs-local-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-password-noop-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-password-disk-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-password-static-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-password-chained-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-fs-ftp-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-fs-ssh-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-fs-s3-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+            <dependency>
+                <groupId>fr.pilato.elasticsearch.crawler</groupId>
+                <artifactId>fscrawler-fs-http-plugin</artifactId>
+                <version>3.1-SNAPSHOT</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.pf4j</groupId>
+                <artifactId>pf4j</artifactId>
+                <version>${pl4j.version}</version>
+            </dependency>
+
+            <!-- For FSCrawler S3 plugin -->
+            <dependency>
+                <groupId>io.minio</groupId>
+                <artifactId>minio</artifactId>
+                <version>${minio.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.squareup.okhttp3</groupId>
+                <artifactId>okhttp-jvm</artifactId>
+                <version>5.5.0</version>
+            </dependency>
+            <dependency>
+                <groupId>com.squareup.okio</groupId>
+                <artifactId>okio-jvm</artifactId>
+                <version>3.18.2</version>
+            </dependency>
+
+            <dependency>
+                <groupId>tools.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!-- Manage the Jackson 2.x artifacts still pulled transitively by Tika to a patched release -->
+            <dependency>
+                <groupId>com.fasterxml.jackson</groupId>
+                <artifactId>jackson-bom</artifactId>
+                <version>${jackson2.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <!--
+                jackson-dataformat-xml depends directly on stax2-api 4.3.0, but tika-parent's BOM
+                pins woodstox-core to 7.1.1, which itself depends on stax2-api 4.2.2. Pin stax2-api
+                explicitly so both paths converge on the same (backward-compatible) version.
+             -->
+            <dependency>
+                <groupId>org.codehaus.woodstox</groupId>
+                <artifactId>stax2-api</artifactId>
+                <version>4.3.1</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.jayway.jsonpath</groupId>
+                <artifactId>json-path</artifactId>
+                <version>${jsonpath.version}</version>
+            </dependency>
+            <!--
+                JSON Path 2.8.0 brings json-smart 2.4.1
+             https://ossindex.sonatype.org/vulnerability/CVE-2023-1370
+             -->
+            <dependency>
+                <groupId>net.minidev</groupId>
+                <artifactId>json-smart</artifactId>
+                <version>2.6.0</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.yaml</groupId>
+                <artifactId>snakeyaml</artifactId>
+                <version>${snakeyaml.version}</version>
+            </dependency>
+
+            <!-- gestalt config management: https://github.com/gestalt-config/gestalt -->
+            <dependency>
+                <groupId>com.github.gestalt-config</groupId>
+                <artifactId>gestalt-core</artifactId>
+                <version>${gestalt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.gestalt-config</groupId>
+                <artifactId>gestalt-yaml-jackson3</artifactId>
+                <version>${gestalt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.gestalt-config</groupId>
+                <artifactId>gestalt-json-jackson3</artifactId>
+                <version>${gestalt.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>jakarta.annotation</groupId>
+                <artifactId>jakarta.annotation-api</artifactId>
+                <version>3.0.0</version>
+            </dependency>
+
+            <!-- This is needed to compile on my machine :( -->
+            <dependency>
+                <groupId>com.sun.activation</groupId>
+                <artifactId>jakarta.activation</artifactId>
+                <version>2.0.1</version>
+            </dependency>
+            <dependency>
+                <groupId>jakarta.activation</groupId>
+                <artifactId>jakarta.activation-api</artifactId>
+                <version>2.1.4</version>
+            </dependency>
+            <!-- This is needed to compile on my machine :( -->
+            <dependency>
+                <groupId>jakarta.xml.bind</groupId>
+                <artifactId>jakarta.xml.bind-api</artifactId>
+                <version>4.0.5</version>
+            </dependency>
+            <dependency>
+                <groupId>javax.xml.bind</groupId>
+                <artifactId>jaxb-api</artifactId>
+                <version>2.3.1</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-parent</artifactId>
+                <version>${tika.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-core</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <!-- Tika MockParser for testing erratic parser behaviors -->
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-core</artifactId>
+                <version>${tika.version}</version>
+                <type>test-jar</type>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-parsers-standard-package</artifactId>
+                <version>${tika.version}</version>
+                <type>pom</type>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-serialization</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-vlm</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-parser-scientific-module</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-parser-sqlite3-module</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+
+            <!-- Fix json-path 2.8.0 vs tika 2.9.1 transitive dependency -->
+            <dependency>
+                <groupId>org.ow2.asm</groupId>
+                <artifactId>asm</artifactId>
+                <version>9.10.1</version>
+            </dependency>
+
+            <!-- Version conflict between
+            org.apache.tika:tika-parser-scientific-module:2.1.0 deps
+            org.apache.tika:tika-langdetect-optimaize:2.1.0 deps
+            -->
+            <!-- Because of CVE-2020-8908 and CVE-2018-10237 - this comes from Tika 2.1.0 -->
+            <dependency>
+                <groupId>com.google.guava</groupId>
+                <artifactId>guava</artifactId>
+                <version>33.7.1-jre</version>
+            </dependency>
+
+            <!-- Because of CVE-2024-29857 - this comes from Tika 2.9.2 -->
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcutil-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcpkix-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcjmail-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
+
+            <!-- Version conflict between
+            org.apache.tika:tika-parsers-standard-package:2.1.0 deps
+            -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-lang3</artifactId>
+                <version>3.21.0</version>
+            </dependency>
+
+            <!-- Too old in org.apache.tika:tika-parser-scientific-module:2.9.1 deps -->
+            <dependency>
+                <groupId>joda-time</groupId>
+                <artifactId>joda-time</artifactId>
+                <version>2.14.4</version>
+            </dependency>
+
+            <!-- Because of CVE-2024-7254 - this comes from Tika 2.9.2 -->
+            <dependency>
+                <groupId>com.google.protobuf</groupId>
+                <artifactId>protobuf-java</artifactId>
+                <version>4.36.2</version>
+            </dependency>
+
+            <!-- For Language detection -->
+            <dependency>
+                <groupId>org.apache.tika</groupId>
+                <artifactId>tika-langdetect-optimaize</artifactId>
+                <version>${tika.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.apache.sshd</groupId>
+                <artifactId>sshd-sftp</artifactId>
+                <version>2.20.0</version>
+            </dependency>
+
+            <!-- Dependency for parsing remote ftp directory -->
+            <dependency>
+                <groupId>commons-net</groupId>
+                <artifactId>commons-net</artifactId>
+                <version>3.13.0</version>
+            </dependency>
+            <dependency>
+                <groupId>org.mockftpserver</groupId>
+                <artifactId>MockFtpServer</artifactId>
+                <version>3.2.0</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>org.slf4j</groupId>
+                        <artifactId>slf4j-api</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+
+            <!-- For CLI -->
+            <dependency>
+                <groupId>com.beust</groupId>
+                <artifactId>jcommander</artifactId>
+                <version>1.82</version>
+            </dependency>
+
+            <!-- For REST Server -->
+            <dependency>
+                <groupId>org.glassfish.jersey.containers</groupId>
+                <artifactId>jersey-container-grizzly2-http</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jersey.media</groupId>
+                <artifactId>jersey-media-json-jackson</artifactId>
+                <version>${jersey.version}</version>
+                <exclusions>
+                    <exclusion>
+                        <groupId>com.fasterxml.jackson.module</groupId>
+                        <artifactId>jackson-module-jaxb-annotations</artifactId>
+                    </exclusion>
+                </exclusions>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jersey.media</groupId>
+                <artifactId>jersey-media-multipart</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jersey.inject</groupId>
+                <artifactId>jersey-hk2</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.glassfish.jersey.core</groupId>
+                <artifactId>jersey-client</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+
+            <!-- For the HTTP Client used by ElasticsearchClient -->
+            <dependency>
+                <groupId>org.glassfish.jersey.connectors</groupId>
+                <artifactId>jersey-apache5-connector</artifactId>
+                <version>${jersey.version}</version>
+            </dependency>
+
+            <!-- Force patched httpclient5 — CVE-2026-40542 / CVE-2026-71290 -->
+            <dependency>
+                <groupId>org.apache.httpcomponents.client5</groupId>
+                <artifactId>httpclient5</artifactId>
+                <version>${httpclient5.version}</version>
+            </dependency>
+            <!-- Force patched httpcore5 (transitive via httpclient5) — CVE-2026-54399 / CVE-2026-54428 -->
+            <dependency>
+                <groupId>org.apache.httpcomponents.core5</groupId>
+                <artifactId>httpcore5</artifactId>
+                <version>${httpcore5.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.httpcomponents.core5</groupId>
+                <artifactId>httpcore5-h2</artifactId>
+                <version>${httpcore5.version}</version>
+            </dependency>
+            <!-- Force patched jsoup — CVE-2026-75140 -->
+            <dependency>
+                <groupId>org.jsoup</groupId>
+                <artifactId>jsoup</artifactId>
+                <version>${jsoup.version}</version>
+            </dependency>
+
+            <!-- Logging dependencies -->
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-core</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-api</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-1.2-api</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-slf4j2-impl</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-jcl</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-jul</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.logging.log4j</groupId>
+                <artifactId>log4j-iostreams</artifactId>
+                <version>${log4j.version}</version>
+                <optional>true</optional>
+            </dependency>
+            <!--
+                Too old version otherwise (From Tika 2.9.1 and log4j-jcl 2.22.0)
+            -->
+            <dependency>
+                <groupId>commons-logging</groupId>
+                <artifactId>commons-logging</artifactId>
+                <version>1.4.0</version>
+            </dependency>
+
+            <dependency>
+                <groupId>commons-io</groupId>
+                <artifactId>commons-io</artifactId>
+                <version>2.22.0</version>
+            </dependency>
+
+            <!-- Transitive dep issue:
+            com.squareup.okio:okio-jvm:jar:3.15.0:compile
+              brings org.jetbrains.kotlin:kotlin-stdlib:jar:2.1.21:compile
+             -->
+            <dependency>
+                <groupId>org.jetbrains.kotlin</groupId>
+                <artifactId>kotlin-stdlib</artifactId>
+                <version>2.4.20</version>
+            </dependency>
+
+            <!-- Transitive dep issue:
+             +-org.apache.tika:tika-langdetect-optimaize:jar:3.2.3:compile
+               +-org.jetbrains:annotations:jar:26.0.2:compile
+             +-org.jetbrains.kotlin:kotlin-stdlib:jar:2.2.0:compile
+               +-org.jetbrains:annotations:jar:13.0:compile
+            -->
+            <dependency>
+                <groupId>org.jetbrains</groupId>
+                <artifactId>annotations</artifactId>
+                <version>26.1.0</version>
+            </dependency>
+
+            <dependency>
+                <groupId>org.awaitility</groupId>
+                <artifactId>awaitility</artifactId>
+                <version>4.3.0</version>
+            </dependency>
+
+            <!-- OpenTelemetry BOM — API only; SDK/agent injected at runtime by elastic-otel-javaagent -->
+            <dependency>
+                <groupId>io.opentelemetry</groupId>
+                <artifactId>opentelemetry-bom</artifactId>
+                <version>${opentelemetry.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- Test dependencies -->
+            <dependency>
+                <groupId>org.assertj</groupId>
+                <artifactId>assertj-core</artifactId>
+                <version>3.27.7</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-api</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter-engine</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.platform</groupId>
+                <artifactId>junit-platform-commons</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.platform</groupId>
+                <artifactId>junit-platform-engine</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.platform</groupId>
+                <artifactId>junit-platform-launcher</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit</groupId>
+                <artifactId>junit-bom</artifactId>
+                <version>${junit.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.mockito</groupId>
+                <artifactId>mockito-bom</artifactId>
+                <version>${mockito.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>com.carrotsearch.randomizedtesting</groupId>
+                <artifactId>randomizedtesting-jupiter</artifactId>
+                <version>${randomizedtesting.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers</artifactId>
+                <version>${testcontainers.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-elasticsearch</artifactId>
+                <version>${testcontainers.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-minio</artifactId>
+                <version>${testcontainers.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-nginx</artifactId>
+                <version>${testcontainers.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.wiremock</groupId>
+                <artifactId>wiremock-standalone</artifactId>
+                <version>3.13.2</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.16.0</version>
+                    <configuration>
+                        <release>${java.compiler.version}</release>
+                        <encoding>UTF-8</encoding>
+                        <showDeprecation>true</showDeprecation>
+                        <showWarnings>true</showWarnings>
+                        <compilerArgument>-Xlint:all,-serial,-path,-rawtypes,-unchecked</compilerArgument>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-help-plugin</artifactId>
+                    <version>3.5.2</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-install-plugin</artifactId>
+                    <version>3.2.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-resources-plugin</artifactId>
+                    <version>3.5.0</version>
+                    <configuration>
+                        <propertiesEncoding>UTF-8</propertiesEncoding>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>versions-maven-plugin</artifactId>
+                    <version>2.22.0</version>
+                    <configuration>
+                        <generateBackupPoms>false</generateBackupPoms>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-jar-plugin</artifactId>
+                    <version>3.5.1</version>
+                    <configuration>
+                        <skipIfEmpty>true</skipIfEmpty>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-dependency-plugin</artifactId>
+                    <version>3.11.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.6.0</version>
+                    <configuration>
+                        <failIfNoTests>false</failIfNoTests>
+                        <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                        <parallelTestsTimeoutInSeconds>${tests.timeoutSuite}</parallelTestsTimeoutInSeconds>
+                        <redirectTestOutputToFile>${tests.output}</redirectTestOutputToFile>
+                        <systemPropertyVariables combine.children="append">
+                            <!-- Enable parallel execution -->
+                            <junit.jupiter.execution.parallel.enabled>true</junit.jupiter.execution.parallel.enabled>
+                            <!-- Enable parallel execution of classes -->
+                            <junit.jupiter.execution.parallel.mode.classes.default>same_thread</junit.jupiter.execution.parallel.mode.classes.default>
+                            <!-- Disable parallel execution of test methods -->
+                            <junit.jupiter.execution.parallel.mode.default>same_thread</junit.jupiter.execution.parallel.mode.default>
+                            <!-- Try the new WORKER_THREAD_POOL parallel mode -->
+                            <junit.jupiter.execution.parallel.config.executor-service>WORKER_THREAD_POOL</junit.jupiter.execution.parallel.config.executor-service>
+                            <arg.common>arg.common</arg.common>
+                            <tests.seed>${tests.seed}</tests.seed>
+                            <tests.timeoutSuite>${tests.timeoutSuite}</tests.timeoutSuite>
+                            <tests.timeout>${tests.timeout}</tests.timeout>
+                            <tests.locale>${tests.locale}</tests.locale>
+                            <tests.timezone>${tests.timezone}</tests.timezone>
+                            <java.util.logging.manager>org.apache.logging.log4j.jul.LogManager</java.util.logging.manager>
+                            <java.awt.headless>true</java.awt.headless>
+                            <tests.leaveTemporary>${tests.leaveTemporary}</tests.leaveTemporary>
+                            <sun.net.http.allowRestrictedHeaders>true</sun.net.http.allowRestrictedHeaders>
+                        </systemPropertyVariables>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>default-test</id>
+                            <configuration>
+                                <skipTests>${skipUnitTests}</skipTests>
+                                <includes>
+                                    <include>**/*Test.class</include>
+                                </includes>
+                                <excludes>
+                                    <exclude>**/*$*</exclude>
+                                </excludes>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <!-- Integration tests: separate plugin so -Dit.test= never interferes with -Dtest= -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-failsafe-plugin</artifactId>
+                    <version>3.6.0</version>
+                    <configuration>
+                        <failIfNoTests>false</failIfNoTests>
+                        <failIfNoSpecifiedTests>false</failIfNoSpecifiedTests>
+                        <parallelTestsTimeoutInSeconds>${tests.timeoutSuite}</parallelTestsTimeoutInSeconds>
+                        <redirectTestOutputToFile>${tests.output}</redirectTestOutputToFile>
+                        <systemPropertyVariables combine.children="append">
+                            <!-- Parallel execution enabled by default; use -P sequential_tests to disable -->
+                            <junit.jupiter.execution.parallel.enabled>true</junit.jupiter.execution.parallel.enabled>
+                            <junit.jupiter.execution.parallel.mode.classes.default>concurrent</junit.jupiter.execution.parallel.mode.classes.default>
+                            <junit.jupiter.execution.parallel.mode.default>concurrent</junit.jupiter.execution.parallel.mode.default>
+                            <junit.jupiter.execution.parallel.config.executor-service>WORKER_THREAD_POOL</junit.jupiter.execution.parallel.config.executor-service>
+                            <arg.common>arg.common</arg.common>
+                            <tests.seed>${tests.seed}</tests.seed>
+                            <tests.timeoutSuite>${tests.timeoutSuite}</tests.timeoutSuite>
+                            <tests.timeout>${tests.timeout}</tests.timeout>
+                            <tests.locale>${tests.locale}</tests.locale>
+                            <tests.timezone>${tests.timezone}</tests.timezone>
+                            <java.util.logging.manager>org.apache.logging.log4j.jul.LogManager</java.util.logging.manager>
+                            <java.awt.headless>true</java.awt.headless>
+                            <tests.cluster.url>${tests.cluster.url}</tests.cluster.url>
+                            <tests.cluster.apiKey>${tests.cluster.apiKey}</tests.cluster.apiKey>
+                            <tests.cluster.check_ssl>${tests.cluster.check_ssl}</tests.cluster.check_ssl>
+                            <tests.kibana.url>${tests.kibana.url}</tests.kibana.url>
+                            <tests.index.prefix>${tests.index.prefix}</tests.index.prefix>
+                            <tests.rest.port>${tests.rest.port}</tests.rest.port>
+                            <tests.leaveTemporary>${tests.leaveTemporary}</tests.leaveTemporary>
+                            <sun.net.http.allowRestrictedHeaders>true</sun.net.http.allowRestrictedHeaders>
+                        </systemPropertyVariables>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>integration-test</id>
+                            <goals>
+                                <goal>integration-test</goal>
+                                <goal>verify</goal>
+                            </goals>
+                            <configuration>
+                                <skipITs>${skipIntegTests}</skipITs>
+                                <includes>
+                                    <include>**/*IT.class</include>
+                                </includes>
+                                <excludes>
+                                    <exclude>**/*$*</exclude>
+                                </excludes>
+                            </configuration>
+                        </execution>
+                    </executions>
+                </plugin>
+
+                <!-- To build and publish our docker images -->
+                <plugin>
+                    <groupId>io.fabric8</groupId>
+                    <artifactId>docker-maven-plugin</artifactId>
+                    <version>0.49.0</version>
+                </plugin>
+
+                <!-- Generate the release zip file (run during package step) -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-assembly-plugin</artifactId>
+                    <version>3.8.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>3.6.3</version>
+                    <configuration>
+                        <rules>
+                            <requireJavaVersion>
+                                <version>${java.compiler.version}</version>
+                            </requireJavaVersion>
+                            <dependencyConvergence/>
+                            <requireMavenVersion>
+                                <version>3.3</version>
+                            </requireMavenVersion>
+                        </rules>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <id>enforce</id>
+                            <goals>
+                                <goal>enforce</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-deploy-plugin</artifactId>
+                    <version>3.2.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.sonatype.ossindex.maven</groupId>
+                    <artifactId>ossindex-maven-plugin</artifactId>
+                    <version>3.2.0</version>
+                    <executions>
+                        <execution>
+                            <id>audit-dependencies</id>
+                            <goals>
+                                <goal>audit</goal>
+                            </goals>
+                            <phase>verify</phase>
+                        </execution>
+                    </executions>
+                </plugin>
+                <plugin>
+                    <groupId>org.codehaus.mojo</groupId>
+                    <artifactId>flatten-maven-plugin</artifactId>
+                    <version>1.8.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.sonatype.central</groupId>
+                    <artifactId>central-publishing-maven-plugin</artifactId>
+                    <version>0.11.0</version>
+                    <extensions>true</extensions>
+                    <configuration>
+                        <autoPublish>true</autoPublish>
+                    </configuration>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-gpg-plugin</artifactId>
+                    <version>3.2.8</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-javadoc-plugin</artifactId>
+                    <version>3.12.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-source-plugin</artifactId>
+                    <version>3.4.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>com.diffplug.spotless</groupId>
+                    <artifactId>spotless-maven-plugin</artifactId>
+                    <version>3.10.3</version>
+                    <configuration>
+                        <!-- optional: limit format enforcement to just the files changed by this feature branch -->
+                        <ratchetFrom>origin/main</ratchetFrom>
+                        <java>
+                            <palantirJavaFormat>
+                                <version>2.89.0</version>
+                                <formatJavadoc>true</formatJavadoc>
+                            </palantirJavaFormat>
+                            <forbidWildcardImports/>
+                            <removeUnusedImports/>
+                            <licenseHeader>
+                                <file>${maven.multiModuleProjectDirectory}/src/main/spotless/JavaLicenseHeader.java</file>
+                            </licenseHeader>
+                        </java>
+                        <pom>
+                            <sortPom>
+                                <nrOfIndentSpace>4</nrOfIndentSpace>
+                            </sortPom>
+                        </pom>
+                        <json>
+                            <includes>
+                                <include>src/main/*.json</include>
+                            </includes>
+                            <jackson>
+                                <version>${jackson2.version}</version>
+                            </jackson>
+                        </json>
+                        <yaml>
+                            <includes>
+                                <include>src/main/*.yaml</include>
+                            </includes>
+                            <jackson>
+                                <version>${jackson2.version}</version>
+                            </jackson>
+                        </yaml>
+                        <shell>
+                            <includes>
+                                <include>src/main/*.sh</include>
+                            </includes>
+                            <shfmt>
+                                <version>3.13.1</version>
+                            </shfmt>
+                        </shell>
+                    </configuration>
+                    <executions>
+                        <execution>
+                            <goals>
+                                <goal>check</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+        <plugins>
+            <!-- By default, We don't deploy our IT artifact to maven central -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-javadoc-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <!-- By default, We don't deploy our IT artifact to maven central -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <!-- By default, We don't deploy our IT artifact to maven central -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-deploy-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <!-- By default, we don't publish anything unless set explicitly -->
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <configuration>
+                    <skipPublishing>true</skipPublishing>
+                </configuration>
+            </plugin>
+            <!-- By default, we call spotless -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+            </plugin>
+            <!-- Activate Failsafe for integration tests (*IT.java) -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+    <profiles>
+        <!-- Tests related profiles:
+            -Pdaily: run the default tests (exclude tests tagged with @Nightly) [active by default]
+            -Pnightly: run the nightly tests (include tests tagged with @Nightly)
+            -Psequential_tests: run integration tests sequentially (disables the default parallel execution)
+         -->
+
+        <!-- Default daily tests: we exclude Tests tagged with Nightly (@Nightly) -->
+        <profile>
+            <id>daily</id>
+            <activation>
+                <activeByDefault>true</activeByDefault>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <excludedGroups>Nightly</excludedGroups>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <excludedGroups>Nightly</excludedGroups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- Nightly tests: we include Tests tagged with Nightly (@Nightly) -->
+        <!-- When we want to run tests which could take a lot of time - ie semantic search -->
+        <profile>
+            <id>nightly</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <groups>Nightly</groups>
+                        </configuration>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <groups>Nightly</groups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- Profile to disable parallel test execution (parallel is enabled by default) -->
+        <!-- Use with a live ES cluster: -P sequential_tests -Dtests.cluster.url=http://localhost:9200 -->
+        <profile>
+            <id>sequential_tests</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-failsafe-plugin</artifactId>
+                        <configuration>
+                            <systemPropertyVariables combine.children="override">
+                                <!-- Disable parallel execution -->
+                                <junit.jupiter.execution.parallel.enabled>false</junit.jupiter.execution.parallel.enabled>
+                                <junit.jupiter.execution.parallel.mode.classes.default>same_thread</junit.jupiter.execution.parallel.mode.classes.default>
+                                <junit.jupiter.execution.parallel.mode.default>same_thread</junit.jupiter.execution.parallel.mode.default>
+                            </systemPropertyVariables>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- Profile for ES8 -->
+        <profile>
+            <id>es-8x</id>
+            <properties>
+                <integ.elasticsearch.version>${elasticsearch8.version}</integ.elasticsearch.version>
+            </properties>
+        </profile>
+        <!-- Profile for ES7 -->
+        <profile>
+            <id>es-7x</id>
+            <properties>
+                <integ.elasticsearch.version>${elasticsearch7.version}</integ.elasticsearch.version>
+            </properties>
+        </profile>
+
+        <profile>
+            <id>check_cve_anonymous</id>
+            <activation>
+                <property>
+                    <name>!sonatype.username</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <!-- For each module, we automatically check for vulnerabilities -->
+                    <plugin>
+                        <groupId>org.sonatype.ossindex.maven</groupId>
+                        <artifactId>ossindex-maven-plugin</artifactId>
+                        <configuration>
+                            <cvssScoreThreshold>${ossindex.score}</cvssScoreThreshold>
+                            <excludeVulnerabilityIdsCsv>${ossindex.exclude}</excludeVulnerabilityIdsCsv>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>check_cve_auth</id>
+            <activation>
+                <property>
+                    <name>sonatype.username</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <!-- For each module, we automatically check for vulnerabilities -->
+                    <plugin>
+                        <groupId>org.sonatype.ossindex.maven</groupId>
+                        <artifactId>ossindex-maven-plugin</artifactId>
+                        <configuration>
+                            <cvssScoreThreshold>${ossindex.score}</cvssScoreThreshold>
+                            <excludeVulnerabilityIdsCsv>${ossindex.exclude}</excludeVulnerabilityIdsCsv>
+                            <clientConfiguration>
+                                <authConfiguration>
+                                    <username>${sonatype.username}</username>
+                                    <password>${sonatype.password}</password>
+                                </authConfiguration>
+                            </clientConfiguration>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <profile>
+            <id>release</id>
+            <properties>
+                <!-- docker pull dadoonet/fscrawler (and :noocr) resolve to this release -->
+                <docker.ocr.alias.tag>latest</docker.ocr.alias.tag>
+                <docker.noocr.alias.tag>noocr</docker.noocr.alias.tag>
+            </properties>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <configuration>
+                            <skip>false</skip>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <configuration>
+                            <skip>false</skip>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <phase>verify</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+        <!-- Only used for Tika release candidates tests -->
+        <profile>
+            <id>tika-rc</id>
+            <properties>
+                <tika.version>4.0.0-SNAPSHOT</tika.version>
+            </properties>
+            <repositories>
+                <repository>
+                    <releases>
+                        <enabled>true</enabled>
+                    </releases>
+                    <snapshots>
+                        <enabled>false</enabled>
+                    </snapshots>
+                    <id>tika-rc</id>
+                    <name>Tika Release Candidates</name>
+                    <url>https://repository.apache.org/content/repositories/orgapachetika-1061/</url>
+                </repository>
+            </repositories>
+        </profile>
+    </profiles>
+</project>

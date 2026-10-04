@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="fatal">
+   <Appenders>
+      <Console name="CONSOLE" target="SYSTEM_OUT">
+         <PatternLayout pattern="%d{ABSOLUTE} %highlight{%-5p} [%c{1.}] %m%n"/>
+      </Console>
+      <Console name="CONSOLE_NO_DECORATOR" target="SYSTEM_OUT">
+         <PatternLayout pattern="%m%n"/>
+      </Console>
+   </Appenders>
+   <Loggers>
+      <Logger name="fr.pilato.elasticsearch.crawler" level="info" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="fr.pilato.elasticsearch.crawler.fs.test.integration" level="info" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="fr.pilato.elasticsearch.crawler.fs.tika" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE_NO_DECORATOR"/>
+      </Logger>
+      <Logger name="org.elasticsearch" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.glassfish" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.apache" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="com.optimaize" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="com.jayway" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.mockftpserver" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.apache.sshd" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="okhttp3" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.pf4j" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.apache.tika.parser.ocr.TesseractOCRParser" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.apache.pdfbox" level="fatal" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="org.testcontainers" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="tc.docker.elastic" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="tc.minio/minio:latest" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="tc.nginx:latest" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Logger name="tc.testcontainers/ryuk:0" level="error" additivity="false">
+         <AppenderRef ref="CONSOLE"/>
+      </Logger>
+      <Root level="info">
+         <AppenderRef ref="CONSOLE"/>
+      </Root>
+   </Loggers>
+</Configuration>

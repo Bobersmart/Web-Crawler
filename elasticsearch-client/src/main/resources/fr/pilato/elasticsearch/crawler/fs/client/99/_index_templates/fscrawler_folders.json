@@ -1,0 +1,14 @@
+{
+  "index_patterns": [
+    "INDEX_NAME"
+  ],
+  "priority": 600,
+  "composed_of": [
+    "fscrawler_INDEX_NAME_mapping_attributes",
+    "fscrawler_INDEX_NAME_mapping_file",
+    "fscrawler_INDEX_NAME_mapping_path"
+  ],
+  "_meta": {
+    "description": "FSCrawler template for folders in INDEX_NAME"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "template": {
+    "mappings": {
+      "properties": {
+        "attributes": {
+          "properties": {
+            "group": {
+              "type": "keyword"
+            },
+            "acl": {
+              "properties": {
+                "flags": {
+                  "type": "keyword"
+                },
+                "permissions": {
+                  "type": "keyword"
+                },
+                "principal": {
+                  "type": "keyword"
+                },
+                "type": {
+                  "type": "keyword"
+                }
+              }
+            },
+            "owner": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    }
+  }
+}

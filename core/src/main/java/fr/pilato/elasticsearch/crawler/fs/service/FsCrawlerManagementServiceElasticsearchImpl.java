@@ -1,0 +1,163 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.service;
+
+import com.jayway.jsonpath.JsonPath;
+import fr.pilato.elasticsearch.crawler.fs.beans.Folder;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchHit;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchRequest;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchResponse;
+import fr.pilato.elasticsearch.crawler.fs.client.ESTermQuery;
+import fr.pilato.elasticsearch.crawler.fs.client.ElasticsearchClient;
+import fr.pilato.elasticsearch.crawler.fs.client.ElasticsearchClientException;
+import fr.pilato.elasticsearch.crawler.fs.client.IElasticsearchClient;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerMappingException;
+import fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.SignTool;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import java.io.IOException;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Collection;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+public class FsCrawlerManagementServiceElasticsearchImpl implements FsCrawlerManagementService {
+
+    private static final Logger logger = LogManager.getLogger();
+
+    // TODO Optimize it. We can probably use a search for a big array of filenames instead of
+    // searching fo 10000 files (which is somehow limited).
+    private static final String FILE_FILENAME_FIELD = "file.filename";
+
+    private final IElasticsearchClient client;
+    private final FsSettings settings;
+
+    public FsCrawlerManagementServiceElasticsearchImpl(FsSettings settings) {
+        this.settings = settings;
+        this.client = new ElasticsearchClient(settings);
+    }
+
+    public IElasticsearchClient getClient() {
+        return client;
+    }
+
+    @Override
+    public void start() throws IOException, ElasticsearchClientException {
+        client.start();
+        logger.debug("Elasticsearch Management Service started");
+    }
+
+    @Override
+    public void close() throws IOException {
+        client.close();
+        logger.debug("Elasticsearch Management Service stopped");
+    }
+
+    @Override
+    public String getVersion() throws IOException, ElasticsearchClientException {
+        return client.getVersion();
+    }
+
+    @Override
+    public Collection<String> getFileDirectory(String path) throws NoSuchAlgorithmException {
+
+        if (logger.isTraceEnabled()) {
+            logger.trace(
+                    "Querying elasticsearch for files in dir [path.root:{}]",
+                    SignTool.sign(settings.getFs().getHashAlgorithm(), path));
+        }
+
+        Collection<String> files = new ArrayList<>();
+
+        try {
+            // search() retries transient shard unavailability (503) until the index is searchable
+            ESSearchResponse response = client.search(new ESSearchRequest()
+                    .withIndex(settings.getElasticsearch().getIndex())
+                    .withSize(DIRECTORY_QUERY_LIMIT)
+                    .addStoredField(FILE_FILENAME_FIELD)
+                    .withESQuery(new ESTermQuery(
+                            "path.root", SignTool.sign(settings.getFs().getHashAlgorithm(), path))));
+
+            if (response.getHits() != null) {
+                for (ESSearchHit hit : response.getHits()) {
+                    String name;
+                    if (hit.getStoredFields() != null && hit.getStoredFields().get(FILE_FILENAME_FIELD) != null) {
+                        // In case someone disabled _source which is not recommended
+                        name = hit.getStoredFields().get(FILE_FILENAME_FIELD).get(0);
+                    } else {
+                        // Houston, we have a problem ! We can't get the old files from ES
+                        logger.warn(
+                                "Can't find stored field name to check existing filenames in path [{}]. "
+                                        + "Please set store: true on field [file.filename]",
+                                path);
+                        throw new FsCrawlerMappingException(
+                                "Mapping is incorrect: please set stored: true on field [file.filename].");
+                    }
+                    files.add(name);
+                }
+            }
+        } catch (ElasticsearchClientException e) {
+            logger.debug(
+                    "Index [{}] doesn't exist.", settings.getElasticsearch().getIndex());
+        }
+
+        logger.trace("We found: {}", files);
+
+        return files;
+    }
+
+    @Override
+    public Collection<String> getFolderDirectory(String path) throws NoSuchAlgorithmException {
+        Collection<String> files = new ArrayList<>();
+
+        try {
+            // search() retries transient shard unavailability (503) until the index is searchable
+            ESSearchResponse response = client.search(new ESSearchRequest()
+                    .withIndex(settings.getElasticsearch().getIndexFolder())
+                    .withSize(DIRECTORY_QUERY_LIMIT)
+                    .withESQuery(new ESTermQuery(
+                            "path.root", SignTool.sign(settings.getFs().getHashAlgorithm(), path))));
+
+            if (response.getHits() != null) {
+                for (ESSearchHit hit : response.getHits()) {
+                    files.add(JsonPath.read(hit.getSource(), "$.path.real"));
+                }
+            }
+        } catch (ElasticsearchClientException e) {
+            logger.debug(
+                    "Index [{}] doesn't exist yet. We just return an empty list.",
+                    settings.getElasticsearch().getIndexFolder());
+        }
+
+        return files;
+    }
+
+    @Override
+    public void storeVisitedDirectory(String indexFolder, String id, Folder folder) {
+        client.indexRawJson(indexFolder, id, JsonUtil.serialize(folder), null);
+    }
+
+    @Override
+    public void delete(String index, String id) {
+        client.delete(index, id);
+    }
+}

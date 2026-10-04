@@ -1,0 +1,60 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.tika;
+
+import java.io.InputStream;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+class XmlDocParserTest extends DocParserTestCase {
+
+    @Test
+    void xml() {
+        String doc = extractFromFile("issue-163.xml");
+        Assertions.assertThat(doc)
+                .isEqualTo("{\"version\":\"1.0\",\"subscription-update\":{\"subscriptionid\":\"0\",\"requestid\":\"0\","
+                        + "\"last_push\":\"2016-06-03 06:21:34\",\"current_push\":\"2016-06-03 06:21:37\",\"exec\":\"0.002\","
+                        + "\"lineup\":{\"id\":\"0\",\"del\":\"no\"}}}");
+    }
+
+    @Test
+    void xmlNestedObjects() {
+        String doc = extractFromFile("issue-592.xml");
+        Assertions.assertThat(doc)
+                .isEqualTo("{\"object\":[{\"id\":\"1\",\"name\":\"foo\"},{\"id\":\"2\",\"name\":\"bar\"}]}");
+    }
+
+    @Test
+    void xmlNotReadable() {
+        String doc = extractFromFile(null, "issue-1753.xml");
+        Assertions.assertThat(doc).isEqualTo("{\"Tag\":{\"attr\":\"false\",\"$\":\"Content\"}}");
+    }
+
+    private String extractFromFile(String root, String filename) {
+        InputStream data = getBinaryContent(root, filename);
+        return XmlDocParser.generate(data);
+    }
+
+    private String extractFromFile(String filename) {
+        InputStream data = getBinaryContent(filename);
+        return XmlDocParser.generate(data);
+    }
+}

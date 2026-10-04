@@ -1,0 +1,42 @@
+version: 2
+updates:
+# Enable version updates for Maven
+- package-ecosystem: maven
+  directory: "/"
+  schedule:
+    interval: daily
+    time: "04:00"
+  open-pull-requests-limit: 99
+  assignees:
+  - dadoonet
+  labels:
+  - update
+  milestone: 28
+
+# Enable version updates for Docker
+- package-ecosystem: "docker"
+  # Look for a `Dockerfile` in the `distribution` directory
+  directory: "/distribution/src/main/docker"
+  # Check for updates once a week
+  schedule:
+    interval: daily
+    time: "04:00"
+  open-pull-requests-limit: 99
+  assignees:
+  - dadoonet
+  labels:
+  - update
+  milestone: 28
+
+# Maintain dependencies for GitHub Actions
+- package-ecosystem: "github-actions"
+  directory: "/.github/workflows"
+  schedule:
+    interval: "daily"
+    time: "04:00"
+  open-pull-requests-limit: 99
+  assignees:
+    - dadoonet
+  labels:
+    - update
+  milestone: 28

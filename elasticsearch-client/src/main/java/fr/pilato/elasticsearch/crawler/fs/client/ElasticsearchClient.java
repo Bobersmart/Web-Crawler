@@ -1,0 +1,1904 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.client;
+
+import com.jayway.jsonpath.DocumentContext;
+import com.jayway.jsonpath.PathNotFoundException;
+import fr.pilato.elasticsearch.crawler.fs.beans.Doc;
+import fr.pilato.elasticsearch.crawler.fs.framework.ExponentialBackoffPollInterval;
+import fr.pilato.elasticsearch.crawler.fs.framework.FSCrawlerLogger;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.TimeValue;
+import fr.pilato.elasticsearch.crawler.fs.framework.Version;
+import fr.pilato.elasticsearch.crawler.fs.framework.bulk.FsCrawlerBulkProcessor;
+import fr.pilato.elasticsearch.crawler.fs.framework.bulk.FsCrawlerRetryBulkProcessorListener;
+import fr.pilato.elasticsearch.crawler.fs.settings.BulkOperation;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.ProcessingException;
+import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.client.Client;
+import jakarta.ws.rs.client.ClientBuilder;
+import jakarta.ws.rs.client.Entity;
+import jakarta.ws.rs.client.Invocation;
+import jakarta.ws.rs.client.WebTarget;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.ConnectException;
+import java.security.KeyManagementException;
+import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.time.Duration;
+import java.util.AbstractMap;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.stream.StreamSupport;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
+import javax.net.ssl.X509TrustManager;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.awaitility.Awaitility;
+import org.awaitility.core.ConditionTimeoutException;
+import org.glassfish.jersey.apache5.connector.Apache5ConnectorProvider;
+import org.glassfish.jersey.client.ClientConfig;
+import org.glassfish.jersey.client.ClientProperties;
+import org.glassfish.jersey.client.authentication.HttpAuthenticationFeature;
+import org.glassfish.jersey.logging.LoggingFeature;
+
+/** Elasticsearch Client */
+public class ElasticsearchClient implements IElasticsearchClient {
+
+    private static final Logger logger = LogManager.getLogger();
+
+    // Prefix for all ES objects
+    public static final String FSCRAWLER_PREFIX = "fscrawler_";
+
+    // FSCrawler ES Settings
+    public static final String FSCRAWLER_SETTINGS_TOTAL_FIELDS = FSCRAWLER_PREFIX + "settings_total_fields";
+
+    // FSCrawler ES Alias
+    public static final String FSCRAWLER_ALIAS = FSCRAWLER_PREFIX + "alias";
+
+    // FSCrawler ES Index names
+    public static final String FSCRAWLER_DOCS_SEMANTIC = FSCRAWLER_PREFIX + "docs_semantic";
+    public static final String FSCRAWLER_DOCS = FSCRAWLER_PREFIX + "docs";
+    public static final String FSCRAWLER_FOLDERS = FSCRAWLER_PREFIX + "folders";
+
+    // FSCrawler ES Mappings
+    public static final String FSCRAWLER_MAPPING_ATTACHMENT = FSCRAWLER_PREFIX + "mapping_attachment";
+    public static final String FSCRAWLER_MAPPING_ATTRIBUTES = FSCRAWLER_PREFIX + "mapping_attributes";
+    public static final String FSCRAWLER_MAPPING_FILE = FSCRAWLER_PREFIX + "mapping_file";
+    public static final String FSCRAWLER_MAPPING_PATH = FSCRAWLER_PREFIX + "mapping_path";
+    public static final String FSCRAWLER_MAPPING_CONTENT_SEMANTIC = FSCRAWLER_PREFIX + "mapping_content_semantic";
+    public static final String FSCRAWLER_MAPPING_CONTENT = FSCRAWLER_PREFIX + "mapping_content";
+    public static final String FSCRAWLER_MAPPING_META = FSCRAWLER_PREFIX + "mapping_meta";
+
+    // Doc type _doc
+    public static final String ES_TYPE_DOC = "/_doc/";
+
+    // Elasticsearch API endpoints
+    public static final String API_COMPONENT_TEMPLATE = "_component_template/";
+    public static final String API_INDEX_TEMPLATE = "_index_template/";
+    public static final String API_SEARCH = "_search";
+    public static final String API_SECURITY_API_KEY = "_security/api_key";
+    public static final String API_INGEST_PIPELINE = "_ingest/pipeline/";
+    private static final String PATH_DELIMITER = "/";
+
+    // User agent
+    private static final String USER_AGENT = "FSCrawler-Rest-Client-" + Version.getVersion();
+
+    public static final int CHECK_NODES_EVERY = 10;
+
+    private static final Duration DEFAULT_RETRY_MAX_DURATION = Duration.ofMinutes(5);
+    private static final Duration DEFAULT_RETRY_INITIAL_DELAY = Duration.ofMillis(500);
+    private static final Duration DEFAULT_RETRY_MAX_DELAY = Duration.ofSeconds(30);
+
+    private final FsSettings settings;
+    /** Factory for document writes, resolved once from {@code elasticsearch.bulk_operation}. */
+    private final InsertOperationFactory insertOperationFactory;
+
+    /** From {@code elasticsearch.retry_max_duration} — wall-clock budget for 5xx/429 and cold-start 404 on GET /. */
+    private final Duration retryMaxDuration;
+    /** From {@code elasticsearch.retry_initial_delay}. */
+    private final Duration retryInitialDelay;
+    /** From {@code elasticsearch.retry_max_delay}. */
+    private final Duration retryMaxDelay;
+
+    private Client client = null;
+    private FsCrawlerBulkProcessor<ElasticsearchOperation, ElasticsearchBulkRequest, ElasticsearchBulkResponse>
+            bulkProcessor = null;
+    /**
+     * Set when a whole {@code _bulk} HTTP call fails after retries (429/5xx). Observed by
+     * {@link #ensureBulkSucceeded()} (without clearing) and cleared by {@link #clearFatalBulkFailure()}.
+     */
+    private final AtomicReference<Exception> fatalBulkFailure = new AtomicReference<>();
+    /**
+     * Monotonic counter bumped on every recorded bulk failure. Survives {@link #clearFatalBulkFailure()} so REST can
+     * detect a failure that the crawl cleared from the sticky flag.
+     */
+    private final AtomicLong bulkFailureGeneration = new AtomicLong();
+
+    private final List<String> hosts;
+    private final List<String> initialHosts;
+
+    private String version = null;
+    private String license = null;
+    private int majorVersion;
+    private int minorVersion;
+    private int currentNode = -1;
+    private int currentRun = -1;
+    private String authorizationHeader = null;
+    private boolean semanticSearch;
+    private boolean vectorSearch = false;
+    private boolean serverless;
+
+    public ElasticsearchClient(FsSettings settings) {
+        this.settings = settings;
+        this.insertOperationFactory =
+                insertOperationFactory(settings.getElasticsearch().getBulkOperation());
+        this.retryMaxDuration =
+                durationOf(settings.getElasticsearch().getRetryMaxDuration(), DEFAULT_RETRY_MAX_DURATION);
+        this.retryInitialDelay =
+                durationOf(settings.getElasticsearch().getRetryInitialDelay(), DEFAULT_RETRY_INITIAL_DELAY);
+        this.retryMaxDelay = durationOf(settings.getElasticsearch().getRetryMaxDelay(), DEFAULT_RETRY_MAX_DELAY);
+        this.hosts = new ArrayList<>(settings.getElasticsearch().getUrls().size());
+        this.initialHosts =
+                new ArrayList<>(settings.getElasticsearch().getUrls().size());
+        settings.getElasticsearch().getUrls().forEach(url -> {
+            hosts.add(url);
+            initialHosts.add(url);
+        });
+        if (hosts.size() == 1) {
+            // We have only one node, so we won't have to select a specific one but the only one.
+            currentNode = 0;
+        }
+        semanticSearch = settings.getElasticsearch().isSemanticSearch();
+    }
+
+    private static Duration durationOf(TimeValue timeValue, Duration fallback) {
+        return timeValue == null ? fallback : Duration.ofMillis(timeValue.millis());
+    }
+
+    @FunctionalInterface
+    private interface InsertOperationFactory {
+        ElasticsearchInsertOperation create(String index, String id, String pipeline, String json);
+    }
+
+    @Override
+    public void start() throws ElasticsearchClientException {
+        if (client != null) {
+            // The client has already been initialized. Let's skip this again
+            return;
+        }
+
+        // Create the client
+        ClientConfig config = new ClientConfig();
+
+        // Use JDK Native HttpClient instead of the default HttpURLConnection
+        config.connectorProvider(new Apache5ConnectorProvider());
+
+        // We need to suppress this, so we can do DELETE with body
+        config.property(ClientProperties.SUPPRESS_HTTP_COMPLIANCE_VALIDATION, true);
+
+        ClientBuilder clientBuilder = ClientBuilder.newBuilder()
+                .hostnameVerifier(new NullHostNameVerifier())
+                .withConfig(config);
+
+        SSLContext sslContext = null;
+        if (settings.getElasticsearch().isSslVerification()) {
+            String caCertificatePath = settings.getElasticsearch().getCaCertificate();
+            if (caCertificatePath != null) {
+                File certFile = new File(caCertificatePath);
+                sslContext = sslContextFromHttpCaCrt(certFile);
+                logger.debug("Using provided CA Certificate from [{}]", caCertificatePath);
+                clientBuilder.sslContext(sslContext);
+            }
+        } else {
+            // Trusting all certificates. For test purposes only.
+            try {
+                sslContext = SSLContext.getInstance("TLS");
+                sslContext.init(null, trustAllCerts, new SecureRandom());
+                clientBuilder.sslContext(sslContext);
+            } catch (KeyManagementException | NoSuchAlgorithmException e) {
+                logger.warn("Failed to get SSL Context", e);
+                throw new ElasticsearchClientException("Failed to get SSL Context", e);
+            }
+        }
+
+        // If we have an Api Key let's use it. Otherwise, we will use basic auth
+        if (!FsCrawlerUtil.isNullOrEmpty(settings.getElasticsearch().getApiKey())) {
+            authorizationHeader = "ApiKey " + settings.getElasticsearch().getApiKey();
+        } else {
+            HttpAuthenticationFeature feature = HttpAuthenticationFeature.basic(
+                    settings.getElasticsearch().getUsername(),
+                    settings.getElasticsearch().getPassword());
+            clientBuilder.register(feature);
+        }
+        if (sslContext != null) {
+            clientBuilder.sslContext(sslContext);
+        }
+        client = clientBuilder.build();
+        if (logger.isTraceEnabled()) {
+            client
+                    //                    .property(LoggingFeature.LOGGING_FEATURE_LOGGER_NAME_CLIENT,
+                    // ElasticsearchClient.class.getName())
+                    .property(LoggingFeature.LOGGING_FEATURE_LOGGER_LEVEL_CLIENT, Level.FINEST.getName())
+                    .property(LoggingFeature.LOGGING_FEATURE_VERBOSITY_CLIENT, LoggingFeature.Verbosity.PAYLOAD_ANY)
+                    .property(LoggingFeature.LOGGING_FEATURE_MAX_ENTITY_SIZE_CLIENT, 8000);
+        }
+
+        try {
+            String esVersion = getVersion();
+            logger.debug("Elasticsearch Client connected to a node running version {}", esVersion);
+            if (!settings.getElasticsearch().isSslVerification()) {
+                logger.warn("We are not doing SSL verification. It's not recommended for production.");
+            }
+        } catch (Exception e) {
+            logger.warn(
+                    "Failed to create elasticsearch client on {}. Message: {}.",
+                    settings.getElasticsearch(),
+                    e.getMessage());
+            throw e;
+        }
+
+        // Check that the pipeline exists when one is defined
+        if (settings.getElasticsearch().getPipeline() != null
+                && !isExistingPipeline(settings.getElasticsearch().getPipeline())) {
+            throw new ElasticsearchClientException(
+                    "You defined pipeline:" + settings.getElasticsearch().getPipeline() + ", but it does not exist.");
+        }
+
+        if (semanticSearch) {
+            // Check the version we are running or if it's using serverless
+            if ((majorVersion >= 8 && minorVersion >= 17) || serverless || (majorVersion >= 9)) {
+                logger.debug(
+                        "Semantic search is enabled and we are running on a version of Elasticsearch {} "
+                                + "which is 8.17 or higher. We will try to use the semantic search features.",
+                        version);
+                license = getLicense();
+                if (!"enterprise".equals(license) && !"trial".equals(license)) {
+                    logger.warn(
+                            "Semantic search is enabled but we are running Elasticsearch with a {} "
+                                    + "license although we need either an enterprise or trial license. "
+                                    + "We will not be able to use the semantic search features ATM. We might switch later to "
+                                    + "a vector embeddings generation.",
+                            license);
+                    semanticSearch = false;
+                    vectorSearch = true;
+                } else {
+                    logger.debug("Semantic search is enabled");
+                }
+            } else {
+                logger.warn(
+                        "Semantic search is enabled but we are running on a version of Elasticsearch {} "
+                                + "which is lower than 8.17. We will not be able to use the semantic search features.",
+                        version);
+                semanticSearch = false;
+            }
+        }
+
+        // Create the BulkProcessor instance
+        initBulkProcessor();
+    }
+
+    /**
+     * Creates the {@link FsCrawlerBulkProcessor} used to batch index/delete operations. Extracted so that tests can
+     * override it — e.g. to avoid starting a background flush thread when only direct, synchronous operations are used.
+     */
+    protected void initBulkProcessor() {
+        bulkProcessor = new FsCrawlerBulkProcessor.Builder<>(
+                        new ElasticsearchEngine(this), new FailOnHttpBulkErrorListener(), ElasticsearchBulkRequest::new)
+                .setBulkActions(settings.getElasticsearch().getBulkSize())
+                .setFlushInterval(settings.getElasticsearch().getFlushInterval())
+                .setByteSize(settings.getElasticsearch().getByteSize())
+                .build();
+    }
+
+    /**
+     * Retries item-level {@code es_rejected_execution_exception} and records whole-request HTTP failures (after
+     * retries) so {@link #ensureBulkSucceeded()} can fail the crawl/run.
+     */
+    private final class FailOnHttpBulkErrorListener
+            extends FsCrawlerRetryBulkProcessorListener<
+                    ElasticsearchOperation, ElasticsearchBulkRequest, ElasticsearchBulkResponse> {
+
+        private FailOnHttpBulkErrorListener() {
+            super("es_rejected_execution_exception");
+        }
+
+        @Override
+        public void afterBulk(long executionId, ElasticsearchBulkRequest request, ElasticsearchBulkResponse response) {
+            super.afterBulk(executionId, request, response);
+            if (response.getException() != null) {
+                logger.error(
+                        "Bulk request failed after retries ({} actions): {}. See {} for action details.",
+                        request.numberOfActions(),
+                        response.getException().getMessage(),
+                        FSCrawlerLogger.BULK_FAILURES_LOG_FILE,
+                        response.getException());
+                recordFatalBulkFailure(response.getException());
+            }
+        }
+
+        @Override
+        public void afterBulk(long executionId, ElasticsearchBulkRequest request, Throwable failure) {
+            super.afterBulk(executionId, request, failure);
+            logger.error(
+                    "Bulk request failed ({} actions): {}. See {} for action details.",
+                    request.numberOfActions(),
+                    failure.getMessage() != null
+                            ? failure.getMessage()
+                            : failure.getClass().getName(),
+                    FSCrawlerLogger.BULK_FAILURES_LOG_FILE,
+                    failure);
+            Exception asException = failure instanceof Exception e
+                    ? e
+                    : new ElasticsearchClientException("Bulk request failed", failure);
+            recordFatalBulkFailure(asException);
+        }
+
+        @Override
+        protected void logOperationPayloadTrace(String reason, long executionId, ElasticsearchOperation operation) {
+            if (operation instanceof ElasticsearchInsertOperation insert) {
+                FSCrawlerLogger.bulkFailureTrace(
+                        reason,
+                        "executionId={} {} {}/{} payload={}",
+                        executionId,
+                        insert.getOperation(),
+                        insert.getIndex(),
+                        insert.getId(),
+                        FSCrawlerLogger.truncateForBulkFailureLog(insert.getJson()));
+            } else {
+                super.logOperationPayloadTrace(reason, executionId, operation);
+            }
+        }
+    }
+
+    private void recordFatalBulkFailure(Exception failure) {
+        fatalBulkFailure.compareAndSet(null, failure);
+        bulkFailureGeneration.incrementAndGet();
+    }
+
+    private static SSLContext sslContextFromHttpCaCrt(File file) throws ElasticsearchClientException {
+        try (InputStream in = new FileInputStream(file)) {
+            CertificateFactory cf = CertificateFactory.getInstance("X.509");
+            Certificate certificate = cf.generateCertificate(in);
+
+            final KeyStore keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+            keyStore.load(null, null);
+            keyStore.setCertificateEntry("elasticsearch-ca", certificate);
+
+            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(keyStore);
+
+            SSLContext sslContext = SSLContext.getInstance("TLS");
+            sslContext.init(null, tmf.getTrustManagers(), null);
+            return sslContext;
+        } catch (CertificateException
+                | NoSuchAlgorithmException
+                | KeyManagementException
+                | KeyStoreException
+                | IOException e) {
+            throw new ElasticsearchClientException("Failed to create SSL Context from CA certificate", e);
+        }
+    }
+
+    public List<String> getAvailableNodes() {
+        return hosts;
+    }
+
+    @Override
+    public String getVersion() throws ElasticsearchClientException {
+        if (version != null) {
+            return version;
+        }
+        return getVersionInternal();
+    }
+
+    private String getVersionInternal() throws ElasticsearchClientException {
+        logger.trace("get version");
+        String response = httpGet(null);
+        // We parse the response
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        // Cache the version and the major version
+        version = document.read("$.version.number");
+        majorVersion = FsCrawlerUtil.extractMajorVersion(version);
+        minorVersion = FsCrawlerUtil.extractMinorVersion(version);
+        serverless = false;
+
+        try {
+            if ("serverless".equals(document.read("$.version.build_flavor"))) {
+                logger.debug("We are running on Elastic serverless cloud so we can not consider version number.");
+                serverless = true;
+                version = "serverless";
+                majorVersion = 99;
+                minorVersion = 999;
+            }
+        } catch (PathNotFoundException e) {
+            // We are not running an official Elasticsearch version
+            logger.info("FSCrawler only supports Elasticsearch official distribution. "
+                    + "You are running another custom distribution. We will not be able to use some features like "
+                    + "semantic search.");
+        }
+        logger.debug("get version returns {} and {} as the major version number", version, majorVersion);
+        return version;
+    }
+
+    @Override
+    public String getLicense() throws ElasticsearchClientException {
+        if (license != null) {
+            return license;
+        }
+
+        // License endpoint might not be ready in IT so we retry with exponential wait time up to 1 minute
+        try {
+            return Awaitility.await()
+                    .atMost(Duration.ofMinutes(1))
+                    .pollInterval(
+                            ExponentialBackoffPollInterval.exponential(Duration.ofSeconds(1), Duration.ofSeconds(10)))
+                    .until(
+                            () -> {
+                                try {
+                                    return getLicenseInternal();
+                                } catch (NotFoundException e) {
+                                    logger.warn("License endpoint is not ready yet. Retrying...");
+                                    return null;
+                                }
+                            },
+                            Objects::nonNull);
+        } catch (ConditionTimeoutException e) {
+            throw new ElasticsearchClientException("License endpoint is not ready after 1 minute");
+        }
+    }
+
+    private String getLicenseInternal() throws ElasticsearchClientException {
+        logger.trace("get license");
+        String response = httpGet("_license");
+
+        // We parse the response
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        // Cache the license level
+        license = document.read("$.license.type");
+
+        logger.debug("get license returns {}", license);
+        return license;
+    }
+
+    @Override
+    public int getMajorVersion() {
+        return majorVersion;
+    }
+
+    @Override
+    public void pushComponentTemplate(String name, String json) throws ElasticsearchClientException {
+        logger.debug("push component template [{}]", name);
+        String url = API_COMPONENT_TEMPLATE + name;
+        logger.trace("component template: [{}]", json);
+        try {
+            httpPut(url, json);
+        } catch (WebApplicationException e) {
+            throw new ElasticsearchClientException("Error while creating component template " + name, e);
+        }
+    }
+
+    @Override
+    public void pushIndexTemplate(String name, String json) throws ElasticsearchClientException {
+        logger.debug("push index template [{}]", name);
+        String url = API_INDEX_TEMPLATE + name;
+        logger.trace("index template: [{}]", json);
+        try {
+            httpPut(url, json);
+        } catch (WebApplicationException e) {
+            String errorMessage = e.getResponse().readEntity(String.class);
+            logger.error("Error while creating index template [{}]: {}", name, errorMessage);
+            logger.error("PUT {}\n{}", url, json);
+            throw new ElasticsearchClientException(
+                    "Error while creating index template " + name + ". Response is: " + errorMessage, e);
+        }
+    }
+
+    /**
+     * Check if an index exists
+     *
+     * @param index index name
+     * @return true if the index exists, false otherwise
+     */
+    @Override
+    public boolean isExistingIndex(String index) throws ElasticsearchClientException {
+        logger.trace("is existing index [{}]", index);
+        try {
+            httpGet(index);
+            logger.debug("Index [{}] was found", index);
+            return true;
+        } catch (NotFoundException e) {
+            logger.debug("Index [{}] was not found", index);
+            return false;
+        }
+    }
+
+    /**
+     * Check if a pipeline exists
+     *
+     * @param pipelineName pipeline name
+     * @return true if the pipeline exists, false otherwise
+     */
+    @Override
+    public boolean isExistingPipeline(String pipelineName) throws ElasticsearchClientException {
+        logger.trace("is existing pipeline [{}]", pipelineName);
+        try {
+            httpGet(API_INGEST_PIPELINE + pipelineName);
+            logger.debug("Pipeline [{}] was found", pipelineName);
+            return true;
+        } catch (NotFoundException e) {
+            logger.debug("Pipeline [{}] was not found", pipelineName);
+            return false;
+        }
+    }
+
+    /**
+     * Check if a component template exists
+     *
+     * @param templateName component template name
+     * @return true if the component template exists, false otherwise
+     */
+    @Override
+    public boolean isExistingComponentTemplate(String templateName) throws ElasticsearchClientException {
+        logger.trace("is existing component template [{}]", templateName);
+        try {
+            httpGet(API_COMPONENT_TEMPLATE + templateName);
+            logger.debug("Component template [{}] was found", templateName);
+            return true;
+        } catch (NotFoundException e) {
+            logger.debug("Component template [{}] was not found", templateName);
+            return false;
+        }
+    }
+
+    /**
+     * Check if an index template exists
+     *
+     * @param templateName index template name
+     * @return true if the index template exists, false otherwise
+     */
+    @Override
+    public boolean isExistingIndexTemplate(String templateName) throws ElasticsearchClientException {
+        logger.trace("is existing index template [{}]", templateName);
+        try {
+            httpGet(API_INDEX_TEMPLATE + templateName);
+            logger.debug("Index template [{}] was found", templateName);
+            return true;
+        } catch (NotFoundException e) {
+            logger.debug("Index template [{}] was not found", templateName);
+            return false;
+        }
+    }
+
+    /**
+     * Refresh an index (only used in tests)
+     *
+     * @param index index name
+     * @throws ElasticsearchClientException In case of error
+     */
+    @Override
+    public void refresh(String index) throws ElasticsearchClientException {
+        if (serverless) {
+            logger.debug("Skipping refresh on serverless");
+            return;
+        }
+
+        logger.debug("refresh index [{}]", index);
+        String url = index + "/_refresh";
+        if (index == null) {
+            url = "_refresh";
+        }
+        String response = httpPost(url, null);
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        int shardsFailed = document.read("$._shards.failed");
+        if (shardsFailed > 0) {
+            throw new ElasticsearchClientException("Unable to refresh index " + index + " : " + response);
+        }
+    }
+
+    /**
+     * Wait for an index to become at least yellow (all primaries assigned), up to 10 seconds
+     *
+     * @param index index name
+     */
+    @Override
+    public void waitForHealthyIndex(String index) throws ElasticsearchClientException {
+        AtomicReference<Exception> errorWhileWaiting = new AtomicReference<>();
+        try {
+            Awaitility.await()
+                    .atMost(10, TimeUnit.SECONDS)
+                    .pollInterval(
+                            ExponentialBackoffPollInterval.exponential(Duration.ofMillis(500), Duration.ofSeconds(5)))
+                    .until(() -> {
+                        try {
+                            String health = catIndicesHealth(index);
+                            errorWhileWaiting.set(null);
+                            return "green".equals(health) || "yellow".equals(health);
+                        } catch (Exception e) {
+                            errorWhileWaiting.set(e);
+                            return false;
+                        }
+                    });
+        } catch (ConditionTimeoutException e) {
+            // If we caught an exception during waiting, throw it instead of the timeout
+            if (errorWhileWaiting.get() != null) {
+                Exception cause = errorWhileWaiting.get();
+                throw new ElasticsearchClientException("Error while waiting for healthy index [" + index + "]", cause);
+            }
+            logger.warn("Index [{}] did not become healthy within 10 seconds", index);
+        }
+    }
+
+    private String catIndicesHealth(String index) throws ElasticsearchClientException {
+        try {
+            String response = httpGet("_cat/indices/" + index, new AbstractMap.SimpleImmutableEntry<>("h", "health"));
+            DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+            String health = document.read("$[0].health");
+            logger.trace("index [{}] health: [{}]", index, health);
+            return health;
+        } catch (WebApplicationException e) {
+            if (e.getResponse().getStatus() == Response.Status.NOT_FOUND.getStatusCode()) {
+                logger.debug("Index [{}] not found yet", index);
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Trust-all manager used only when {@code elasticsearch.ssl_verification} is false (tests / local clusters with
+     * self-signed certs). Production deployments should keep verification enabled.
+     */
+    @SuppressWarnings("java:S4830")
+    private static final class TrustAllX509TrustManager implements X509TrustManager {
+        @Override
+        public void checkClientTrusted(X509Certificate[] chain, String authType) {
+            // Intentionally empty: certificate validation is opted out via ssl_verification=false
+        }
+
+        @Override
+        public void checkServerTrusted(X509Certificate[] chain, String authType) {
+            // Intentionally empty: certificate validation is opted out via ssl_verification=false
+        }
+
+        @Override
+        public X509Certificate[] getAcceptedIssuers() {
+            return new X509Certificate[0];
+        }
+    }
+
+    private static final TrustManager[] trustAllCerts = new TrustManager[] {new TrustAllX509TrustManager()};
+
+    public static class NullHostNameVerifier implements HostnameVerifier {
+        @Override
+        public boolean verify(String urlHostName, SSLSession session) {
+            if (!urlHostName.equalsIgnoreCase(session.getPeerHost())) {
+                logger.warn("URL host [{}] is different to SSLSession host [{}].", urlHostName, session.getPeerHost());
+            }
+            return true;
+        }
+    }
+
+    @Override
+    public void index(String index, String id, Doc doc, String pipeline) {
+        String json = JsonUtil.serialize(doc);
+        indexRawJson(index, id, json, pipeline);
+    }
+
+    @Override
+    public void indexRawJson(String index, String id, String json, String pipeline) {
+        logger.trace("JSon indexed : {}", json);
+        bulkProcessor.add(insertOperationFactory.create(index, id, pipeline, json));
+    }
+
+    /**
+     * Chooses {@link ElasticsearchCreateOperation} or {@link ElasticsearchIndexOperation} from
+     * {@code elasticsearch.bulk_operation}. Resolved once at client construction because the setting is immutable for
+     * the life of the client. Unset values fall back to {@code index}.
+     */
+    private static InsertOperationFactory insertOperationFactory(BulkOperation bulkOperation) {
+        if (bulkOperation == BulkOperation.CREATE) {
+            return ElasticsearchCreateOperation::new;
+        }
+        return ElasticsearchIndexOperation::new;
+    }
+
+    @Override
+    public void indexSingle(String index, String id, String json, String pipeline) throws ElasticsearchClientException {
+        logger.trace("JSon indexed : {}", json);
+        String url = index + ES_TYPE_DOC + id;
+        if (!FsCrawlerUtil.isNullOrEmpty(pipeline)) {
+            url += "?pipeline=" + pipeline;
+        }
+        httpPut(url, json);
+    }
+
+    @Override
+    public void delete(String index, String id) {
+        bulkProcessor.add(new ElasticsearchDeleteOperation(index, id));
+    }
+
+    @Override
+    public void deleteSingle(String index, String id) throws ElasticsearchClientException {
+        logger.debug("Removing document : {}/{}", index, id);
+        try {
+            String response = httpDelete(index + ES_TYPE_DOC + id, null);
+
+            DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+            String result = document.read("$.result");
+            if (!result.equals("deleted")) {
+                throw new ElasticsearchClientException(
+                        "Can not remove document " + index + "/" + id + " cause: " + response);
+            }
+
+            logger.debug("Document {}/{} has been removed", index, id);
+        } catch (NotFoundException e) {
+            logger.debug("Document {}/{} does not exist. It can't be removed.", index, id);
+            throw new ElasticsearchClientException("Document " + index + "/" + id + " does not exist");
+        }
+    }
+
+    @Override
+    public void close() throws IOException {
+        logger.debug("Closing Elasticsearch client manager");
+        if (bulkProcessor != null) {
+            bulkProcessor.close();
+        }
+        if (client != null) {
+            client.close();
+        }
+    }
+
+    @Override
+    public void createIndexAndComponentTemplates() throws IOException, ElasticsearchClientException {
+        if (settings.getElasticsearch().isPushTemplates()) {
+            boolean forcePush = settings.getElasticsearch().isForcePushTemplates();
+
+            // Check if the index template already exists for docs
+            String docsIndexTemplateName =
+                    FSCRAWLER_PREFIX + settings.getElasticsearch().getIndex() + "_docs";
+            if (semanticSearch) {
+                docsIndexTemplateName =
+                        FSCRAWLER_PREFIX + settings.getElasticsearch().getIndex() + "_docs_semantic";
+            }
+
+            boolean docsIndexTemplateExists = isExistingIndexTemplate(docsIndexTemplateName);
+
+            if (docsIndexTemplateExists && !forcePush) {
+                logger.debug(
+                        "Index template [{}] already exists. Skipping templates management for docs. "
+                                + "Use force_push_templates: true to override.",
+                        docsIndexTemplateName);
+            } else {
+                List<String> componentTemplates = new ArrayList<>();
+
+                logger.debug(
+                        "Creating/updating component templates for [{}]",
+                        settings.getElasticsearch().getIndex());
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_ALIAS,
+                        settings.getElasticsearch().getIndex(),
+                        settings.getName(),
+                        forcePush));
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_SETTINGS_TOTAL_FIELDS,
+                        settings.getElasticsearch().getIndex(),
+                        null,
+                        forcePush));
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_MAPPING_ATTRIBUTES,
+                        settings.getElasticsearch().getIndex(),
+                        null,
+                        forcePush));
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_MAPPING_FILE,
+                        settings.getElasticsearch().getIndex(),
+                        null,
+                        forcePush));
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_MAPPING_PATH,
+                        settings.getElasticsearch().getIndex(),
+                        null,
+                        forcePush));
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_MAPPING_ATTACHMENT,
+                        settings.getElasticsearch().getIndex(),
+                        null,
+                        forcePush));
+                if (semanticSearch) {
+                    componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                            majorVersion,
+                            FSCRAWLER_MAPPING_CONTENT_SEMANTIC,
+                            settings.getElasticsearch().getIndex(),
+                            null,
+                            forcePush));
+                } else {
+                    componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                            majorVersion,
+                            FSCRAWLER_MAPPING_CONTENT,
+                            settings.getElasticsearch().getIndex(),
+                            null,
+                            forcePush));
+                }
+                componentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                        majorVersion,
+                        FSCRAWLER_MAPPING_META,
+                        settings.getElasticsearch().getIndex(),
+                        null,
+                        forcePush));
+
+                // Wait for all component templates to be available before creating index templates
+                waitForComponentTemplates(componentTemplates);
+
+                logger.debug(
+                        "Creating/updating index templates for [{}]",
+                        settings.getElasticsearch().getIndex());
+                // If needed, we create the new settings for this files index
+                if (!settings.getFs().isAddAsInnerObject()
+                        || (!settings.getFs().isJsonSupport()
+                                && !settings.getFs().isXmlSupport())) {
+                    if (semanticSearch) {
+                        loadAndPushIndexTemplate(
+                                majorVersion,
+                                FSCRAWLER_DOCS_SEMANTIC,
+                                settings.getElasticsearch().getIndex());
+                    } else {
+                        loadAndPushIndexTemplate(
+                                majorVersion,
+                                FSCRAWLER_DOCS,
+                                settings.getElasticsearch().getIndex());
+                    }
+                }
+            }
+
+            // If needed, we create the component and index templates for the folder index
+            if (settings.getFs().isIndexFolders()) {
+                String folderIndexTemplateName =
+                        FSCRAWLER_PREFIX + settings.getElasticsearch().getIndexFolder() + "_folders";
+                boolean folderIndexTemplateExists = isExistingIndexTemplate(folderIndexTemplateName);
+
+                if (folderIndexTemplateExists && !forcePush) {
+                    logger.debug(
+                            "Index template [{}] already exists. Skipping templates management for folders. "
+                                    + "Use force_push_templates: true to override.",
+                            folderIndexTemplateName);
+                } else {
+                    List<String> folderComponentTemplates = new ArrayList<>();
+
+                    logger.debug(
+                            "Creating/updating component templates for [{}]",
+                            settings.getElasticsearch().getIndexFolder());
+                    folderComponentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                            majorVersion,
+                            FSCRAWLER_MAPPING_ATTRIBUTES,
+                            settings.getElasticsearch().getIndexFolder(),
+                            null,
+                            forcePush));
+                    folderComponentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                            majorVersion,
+                            FSCRAWLER_MAPPING_FILE,
+                            settings.getElasticsearch().getIndexFolder(),
+                            null,
+                            forcePush));
+                    folderComponentTemplates.add(loadAndPushComponentTemplateIfMissing(
+                            majorVersion,
+                            FSCRAWLER_MAPPING_PATH,
+                            settings.getElasticsearch().getIndexFolder(),
+                            null,
+                            forcePush));
+
+                    // Wait for all folder component templates to be available before creating index template
+                    waitForComponentTemplates(folderComponentTemplates);
+
+                    logger.debug(
+                            "Creating/updating index templates for [{}]",
+                            settings.getElasticsearch().getIndexFolder());
+                    loadAndPushIndexTemplate(
+                            majorVersion,
+                            FSCRAWLER_FOLDERS,
+                            settings.getElasticsearch().getIndexFolder());
+                }
+            }
+        }
+    }
+
+    /**
+     * Removes every index template and component template that {@link #createIndexAndComponentTemplates()} may have
+     * created for the given index and folder names.
+     *
+     * <p><b>Test-only.</b> Not used in production. It lets integration tests clean up by precise template names instead
+     * of a wildcard such as {@code fscrawler_<name>_*}, which under parallel execution would also match (and delete)
+     * the templates of a sibling test whose crawler name shares the same prefix (e.g. {@code store_source} vs
+     * {@code store_source_no_index_content}).
+     *
+     * <p>All variants are attempted (semantic or not, with or without folders) and missing templates are ignored, so
+     * cleanup is idempotent and leaves no dangling reference. Index templates are deleted before component templates,
+     * because a component template still referenced by an index template cannot be removed.
+     *
+     * @param settings the settings providing the index and folder names to clean up
+     * @throws ElasticsearchClientException in case of an unexpected error
+     */
+    public void removeIndexAndComponentTemplates(FsSettings settings) throws ElasticsearchClientException {
+        String index = settings.getElasticsearch().getIndex();
+        String indexFolder = settings.getElasticsearch().getIndexFolder();
+
+        // Index templates first: a component template still referenced by an index template cannot be deleted
+        // (Elasticsearch returns a 400). We attempt every variant the crawler may have created so that no index
+        // template is left referencing the component templates we are about to remove.
+        deleteIndexTemplate(prefixedTemplateName(FSCRAWLER_DOCS, index));
+        deleteIndexTemplate(prefixedTemplateName(FSCRAWLER_DOCS_SEMANTIC, index));
+        deleteIndexTemplate(prefixedTemplateName(FSCRAWLER_FOLDERS, indexFolder));
+
+        // Then the component templates (both content variants and the folder ones).
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_ALIAS, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_SETTINGS_TOTAL_FIELDS, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_ATTRIBUTES, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_FILE, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_PATH, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_ATTACHMENT, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_CONTENT, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_CONTENT_SEMANTIC, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_META, index));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_ATTRIBUTES, indexFolder));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_FILE, indexFolder));
+        deleteComponentTemplate(prefixedTemplateName(FSCRAWLER_MAPPING_PATH, indexFolder));
+    }
+
+    /**
+     * Computes the component template names {@link #createIndexAndComponentTemplates()} creates for the given settings.
+     * Must stay in sync with that method.
+     */
+    static List<String> componentTemplateNames(FsSettings settings) {
+        String index = settings.getElasticsearch().getIndex();
+        List<String> names = new ArrayList<>();
+        // Docs component templates
+        names.add(prefixedTemplateName(FSCRAWLER_ALIAS, index));
+        names.add(prefixedTemplateName(FSCRAWLER_SETTINGS_TOTAL_FIELDS, index));
+        names.add(prefixedTemplateName(FSCRAWLER_MAPPING_ATTRIBUTES, index));
+        names.add(prefixedTemplateName(FSCRAWLER_MAPPING_FILE, index));
+        names.add(prefixedTemplateName(FSCRAWLER_MAPPING_PATH, index));
+        names.add(prefixedTemplateName(FSCRAWLER_MAPPING_ATTACHMENT, index));
+        names.add(prefixedTemplateName(
+                settings.getElasticsearch().isSemanticSearch()
+                        ? FSCRAWLER_MAPPING_CONTENT_SEMANTIC
+                        : FSCRAWLER_MAPPING_CONTENT,
+                index));
+        names.add(prefixedTemplateName(FSCRAWLER_MAPPING_META, index));
+        // Folder component templates
+        if (settings.getFs().isIndexFolders()) {
+            String indexFolder = settings.getElasticsearch().getIndexFolder();
+            names.add(prefixedTemplateName(FSCRAWLER_MAPPING_ATTRIBUTES, indexFolder));
+            names.add(prefixedTemplateName(FSCRAWLER_MAPPING_FILE, indexFolder));
+            names.add(prefixedTemplateName(FSCRAWLER_MAPPING_PATH, indexFolder));
+        }
+        return names;
+    }
+
+    /**
+     * Computes the index template names {@link #createIndexAndComponentTemplates()} creates for the given settings.
+     * Must stay in sync with that method.
+     */
+    static List<String> indexTemplateNames(FsSettings settings) {
+        List<String> names = new ArrayList<>();
+        // Docs index template
+        names.add(prefixedTemplateName(
+                settings.getElasticsearch().isSemanticSearch() ? FSCRAWLER_DOCS_SEMANTIC : FSCRAWLER_DOCS,
+                settings.getElasticsearch().getIndex()));
+        // Folder index template
+        if (settings.getFs().isIndexFolders()) {
+            names.add(prefixedTemplateName(
+                    FSCRAWLER_FOLDERS, settings.getElasticsearch().getIndexFolder()));
+        }
+        return names;
+    }
+
+    /**
+     * Builds the prefixed template name the same way the template loader does, e.g. {@code fscrawler_alias} for index
+     * {@code my_docs} becomes {@code fscrawler_my_docs_alias}.
+     */
+    private static String prefixedTemplateName(String name, String index) {
+        return name.replace(FSCRAWLER_PREFIX, FSCRAWLER_PREFIX + index + "_");
+    }
+
+    /**
+     * Deletes a component template, ignoring it if it does not exist. Test-only helper used by
+     * {@link #removeIndexAndComponentTemplates(FsSettings)}.
+     */
+    private void deleteComponentTemplate(String name) throws ElasticsearchClientException {
+        logger.debug("delete component template [{}]", name);
+        try {
+            httpDelete(API_COMPONENT_TEMPLATE + name, null);
+        } catch (NotFoundException e) {
+            logger.debug("Component template [{}] does not exist. Nothing to delete.", name);
+        } catch (BadRequestException e) {
+            // Still referenced by an index template we do not track (e.g. a custom one). Safe to ignore in tests.
+            logger.debug("Component template [{}] could not be deleted (still in use?). Ignoring.", name);
+        }
+    }
+
+    /**
+     * Deletes an index template, ignoring it if it does not exist. Test-only helper used by
+     * {@link #removeIndexAndComponentTemplates(FsSettings)}.
+     */
+    private void deleteIndexTemplate(String name) throws ElasticsearchClientException {
+        logger.debug("delete index template [{}]", name);
+        try {
+            httpDelete(API_INDEX_TEMPLATE + name, null);
+        } catch (NotFoundException e) {
+            logger.debug("Index template [{}] does not exist. Nothing to delete.", name);
+        } catch (BadRequestException e) {
+            logger.debug("Index template [{}] could not be deleted. Ignoring.", name);
+        }
+    }
+
+    /**
+     * Wait for all component templates to be available
+     *
+     * @param templateNames list of component template names to wait for
+     * @throws ElasticsearchClientException if a component template does not become available within timeout
+     */
+    private void waitForComponentTemplates(List<String> templateNames) throws ElasticsearchClientException {
+        logger.debug("Waiting for component templates to be available: {}", templateNames);
+        for (String templateName : templateNames) {
+            try {
+                Awaitility.await()
+                        .atMost(60, TimeUnit.SECONDS)
+                        .pollInterval(ExponentialBackoffPollInterval.exponential(
+                                Duration.ofMillis(100), Duration.ofSeconds(5)))
+                        .until(() -> {
+                            try {
+                                return isExistingComponentTemplate(templateName);
+                            } catch (Exception e) {
+                                logger.debug(
+                                        "Error while checking component template [{}]: {}",
+                                        templateName,
+                                        e.getMessage());
+                                return false;
+                            }
+                        });
+                logger.debug("Component template [{}] is now available", templateName);
+            } catch (ConditionTimeoutException e) {
+                throw new ElasticsearchClientException(
+                        "Component template [" + templateName + "] did not become available within 60 seconds");
+            }
+        }
+    }
+
+    /**
+     * Load and push a component template only if it doesn't already exist (unless forcePush is true)
+     *
+     * @param version the Elasticsearch major version
+     * @param name the component template name (without the index prefix)
+     * @param index the index name to use as prefix
+     * @param alias the alias to replace in the template (can be null)
+     * @param forcePush if true, always push the template even if it exists
+     * @return the component template name
+     */
+    private String loadAndPushComponentTemplateIfMissing(
+            int version, String name, String index, String alias, boolean forcePush)
+            throws IOException, ElasticsearchClientException {
+        String componentTemplateName = name.replace(FSCRAWLER_PREFIX, FSCRAWLER_PREFIX + index + "_");
+
+        if (!forcePush && isExistingComponentTemplate(componentTemplateName)) {
+            logger.debug("Component template [{}] already exists. Skipping.", componentTemplateName);
+            return componentTemplateName;
+        }
+
+        logger.trace("Loading component template [{}]", name);
+        String json = loadResourceFile(version + "/_component_templates/" + name + ".json");
+
+        // We need to replace the placeholder values if alias is provided
+        if (alias != null) {
+            json = json.replace("ALIAS", alias);
+        }
+
+        pushComponentTemplate(componentTemplateName, json);
+        return componentTemplateName;
+    }
+
+    private void loadAndPushIndexTemplate(int version, String name, String index)
+            throws IOException, ElasticsearchClientException {
+        logger.trace("Loading index template [{}]", name);
+        String json = loadResourceFile(version + "/_index_templates/" + name + ".json");
+
+        // We need to replace the placeholder values
+        json = json.replace("INDEX_NAME", index);
+
+        String indexTemplateName = name.replace(FSCRAWLER_PREFIX, FSCRAWLER_PREFIX + index + "_");
+        pushIndexTemplate(indexTemplateName, json);
+    }
+
+    /**
+     * Reads a resource file from the classpath or from a JAR.
+     *
+     * @param source The target
+     * @return The content of the file
+     */
+    private static String loadResourceFile(String source) throws IOException {
+        try (BufferedReader buffer =
+                new BufferedReader(new InputStreamReader(ElasticsearchClient.class.getResourceAsStream(source)))) {
+            return StreamSupport.stream(buffer.lines().spliterator(), false)
+                    .reduce((a, b) -> a + "\n" + b)
+                    .orElse(null);
+        }
+    }
+
+    @Override
+    public ESSearchResponse search(ESSearchRequest request) throws ElasticsearchClientException {
+
+        String url = "";
+
+        if (!FsCrawlerUtil.isNullOrEmpty(request.getIndex())) {
+            url += request.getIndex() + "/";
+        }
+
+        url += API_SEARCH;
+
+        logger.debug("searching index [{}]", request.getIndex());
+
+        final AtomicReference<String> body = new AtomicReference<>("{ \"track_total_hits\": true");
+
+        int size = 10;
+        if (request.getSize() != null) {
+            size = request.getSize();
+            body.getAndUpdate(s -> s + (", \"size\":" + request.getSize()));
+        }
+        appendStoredFields(body, request);
+        if (request.getESQuery() != null) {
+            body.getAndUpdate(s -> s + (", \"query\" : {" + toElasticsearchQuery(request.getESQuery()) + "}"));
+        }
+        if (!FsCrawlerUtil.isNullOrEmpty(request.getSort())) {
+            body.getAndUpdate(s -> s + (", \"sort\" : [\"" + request.getSort() + "\"]"));
+        }
+        if (!request.getHighlighters().isEmpty()) {
+            body.getAndUpdate(s -> s + ", \"highlight\": { \"fields\": {");
+
+            AtomicBoolean moreFields = new AtomicBoolean(false);
+            request.getHighlighters().forEach(f -> {
+                if (moreFields.getAndSet(true)) {
+                    body.getAndUpdate(s -> s + ",");
+                }
+                body.getAndUpdate(s -> s + ("\"" + f + "\":{}"));
+            });
+            body.getAndUpdate(s -> s + "}}");
+        }
+        if (!request.getAggregations().isEmpty()) {
+            body.getAndUpdate(s -> s + ", \"aggs\": {");
+
+            AtomicBoolean moreFields = new AtomicBoolean(false);
+            request.getAggregations().forEach(a -> {
+                if (moreFields.getAndSet(true)) {
+                    body.getAndUpdate(s -> s + ",");
+                }
+                body.getAndUpdate(
+                        s -> s + ("\"" + a.getName() + "\":{\"terms\": {\"field\": \"" + a.getField() + "\"}}"));
+            });
+            body.getAndUpdate(s -> s + "}");
+        }
+
+        String query = body.updateAndGet(s -> s + "}");
+        logger.trace("Elasticsearch query to run: {}", query);
+
+        try {
+            String response = httpPostWithRetry(url, query, new AbstractMap.SimpleImmutableEntry<>("version", "true"));
+            return parseSearchResponse(response, size);
+        } catch (NotFoundException e) {
+            logger.debug("index {} does not exist.", request.getIndex());
+            throw new ElasticsearchIndexNotFoundException(request.getIndex());
+        } catch (ElasticsearchClientException e) {
+            logger.warn("search on index [{}] failed after retries: {}", request.getIndex(), e.getMessage());
+            throw e;
+        }
+    }
+
+    private ESSearchResponse parseSearchResponse(String response, int size) {
+        ESSearchResponse esSearchResponse = new ESSearchResponse(response);
+
+        // Parse
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        esSearchResponse.setTotalHits(document.read("$.hits.total.value"));
+
+        int numHits = document.read("$.hits.hits.length()");
+        if (numHits < size) {
+            size = numHits;
+        }
+        for (int hitNum = 0; hitNum < size; hitNum++) {
+            final ESSearchHit esSearchHit = new ESSearchHit();
+            esSearchHit.setIndex(document.read(String.format("$.hits.hits[%d]._index", hitNum)));
+            esSearchHit.setId(document.read(String.format("$.hits.hits[%d]._id", hitNum)));
+            esSearchHit.setVersion(
+                    Integer.toUnsignedLong(document.read(String.format("$.hits.hits[%d]._version", hitNum))));
+            try {
+                esSearchHit.setSource(extractJsonFromPath(document, String.format("$.hits.hits[%d]._source", hitNum)));
+            } catch (PathNotFoundException ignored) {
+                // When no _source, we just ignore
+            }
+
+            // Parse the highlights if any
+            try {
+                Map<String, List<String>> highlights =
+                        document.read(String.format("$.hits.hits[%d].highlight", hitNum));
+                highlights.forEach(esSearchHit::addHighlightField);
+            } catch (PathNotFoundException ignored) {
+                // No highlights
+            }
+
+            // Parse the fields if any
+            try {
+                Map<String, List<String>> fields = document.read(String.format("$.hits.hits[%d].fields", hitNum));
+                esSearchHit.setStoredFields(fields);
+            } catch (PathNotFoundException ignored) {
+                // No stored fields
+            }
+            esSearchResponse.addHit(esSearchHit);
+        }
+
+        // Aggregations
+        try {
+            Map<String, Object> aggs = document.read("$.aggregations");
+            aggs.forEach((aggName, v) -> {
+                ESTermsAggregation aggregation = new ESTermsAggregation(aggName, null);
+                List<Map<String, Object>> buckets = document.read("$.aggregations." + aggName + ".buckets");
+                buckets.forEach(map -> {
+                    String key = (String) map.get("key");
+                    long docCount = Integer.toUnsignedLong((Integer) map.get("doc_count"));
+                    aggregation.addBucket(new ESTermsAggregation.ESTermsBucket(key, docCount));
+                });
+                esSearchResponse.addAggregation(aggName, aggregation);
+            });
+        } catch (PathNotFoundException ignored) {
+            // No aggregation
+        }
+
+        return esSearchResponse;
+    }
+
+    // JSON templates for the hand-built Elasticsearch queries
+    private static final String TERM_QUERY = "\"term\": { \"%s\": \"%s\"}";
+    private static final String MATCH_QUERY = "\"match\": { \"%s\": \"%s\"}";
+    private static final String SEMANTIC_QUERY = "\"semantic\": { \"field\":\"%s\", \"query\":\"%s\"}";
+    private static final String PREFIX_QUERY = "\"prefix\": { \"%s\": \"%s\"}";
+
+    private String toElasticsearchQuery(ESQuery query) {
+        if (query instanceof ESTermQuery esQuery) {
+            return String.format(TERM_QUERY, esQuery.getField(), esQuery.getValue());
+        }
+        if (query instanceof ESMatchQuery esQuery) {
+            return String.format(MATCH_QUERY, esQuery.getField(), esQuery.getValue());
+        }
+        if (query instanceof ESSemanticQuery esQuery) {
+            return String.format(SEMANTIC_QUERY, esQuery.getField(), esQuery.getValue());
+        }
+        if (query instanceof ESPrefixQuery esQuery) {
+            return String.format(PREFIX_QUERY, esQuery.getField(), esQuery.getValue());
+        }
+        if (query instanceof ESRangeQuery esQuery) {
+            return toRangeQuery(esQuery);
+        }
+        if (query instanceof ESBoolQuery esQuery) {
+            return toBoolMustQuery(esQuery);
+        }
+        throw new IllegalArgumentException("Query " + query.getClass().getSimpleName() + " not implemented yet");
+    }
+
+    private void appendStoredFields(AtomicReference<String> body, ESSearchRequest request) {
+        if (request.getStoredFields().isEmpty()) {
+            return;
+        }
+        body.getAndUpdate(s -> s + ", \"stored_fields\" : [");
+        AtomicBoolean moreFields = new AtomicBoolean(false);
+        request.getStoredFields().forEach(f -> {
+            if (moreFields.getAndSet(true)) {
+                body.getAndUpdate(s -> s + ",");
+            }
+            body.getAndUpdate(s -> s + ("\"" + f + "\""));
+        });
+        body.getAndUpdate(s -> s + "]");
+    }
+
+    private String toRangeQuery(ESRangeQuery esQuery) {
+        String localQuery = "\"range\": { \"" + esQuery.getField() + "\": {";
+        if (esQuery.getGte() != null) {
+            localQuery += "\"gte\": " + esQuery.getGte();
+            if (esQuery.getLt() != null) {
+                localQuery += ",";
+            }
+        }
+        if (esQuery.getLt() != null) {
+            localQuery += "\"lt\": " + esQuery.getLt();
+        }
+        localQuery += "}}";
+        return localQuery;
+    }
+
+    private String toBoolMustQuery(ESBoolQuery esQuery) {
+        StringBuilder localQuery = new StringBuilder("\"bool\": { \"must\" : [");
+        boolean hasClauses = false;
+        for (ESQuery clause : esQuery.getMustClauses()) {
+            if (hasClauses) {
+                localQuery.append(",");
+            }
+            localQuery.append("{");
+            localQuery.append(toElasticsearchQuery(clause));
+            localQuery.append("}");
+            hasClauses = true;
+        }
+        localQuery.append("]}");
+        return localQuery.toString();
+    }
+
+    @Override
+    public void deleteIndex(String index) throws ElasticsearchClientException {
+        logger.debug("delete index [{}]", index);
+        try {
+            String response = httpDelete(index, null);
+            DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+            boolean acknowledged = document.read("$.acknowledged");
+            if (!acknowledged) {
+                throw new ElasticsearchClientException(
+                        "Can not remove index " + index + " : " + document.read("$.error.reason"));
+            }
+        } catch (NotFoundException e) {
+            logger.debug("Index [{}] was not found", index);
+        }
+    }
+
+    @Override
+    public void createPipeline(String pipeline, String json) throws ElasticsearchClientException {
+        logger.debug("create pipeline [{}]", pipeline);
+        httpPut(API_INGEST_PIPELINE + pipeline, json);
+    }
+
+    @Override
+    public void deletePipeline(String pipeline) throws ElasticsearchClientException {
+        logger.debug("delete pipeline [{}]", pipeline);
+        try {
+            httpDelete(API_INGEST_PIPELINE + pipeline, null);
+        } catch (NotFoundException e) {
+            logger.debug("Pipeline [{}] was not found", pipeline);
+        }
+    }
+
+    @Override
+    public void flush() {
+        if (bulkProcessor != null) {
+            bulkProcessor.flush();
+        }
+    }
+
+    @Override
+    public void flushAndEnsureBulkSucceeded() throws ElasticsearchClientException {
+        flushAndEnsureBulkSucceededSince(bulkFailureGeneration.get());
+    }
+
+    @Override
+    public void flushAndEnsureBulkSucceededSince(long generation) throws ElasticsearchClientException {
+        if (bulkProcessor == null) {
+            ensureBulkSucceededSince(generation);
+            return;
+        }
+        AtomicReference<ElasticsearchClientException> error = new AtomicReference<>();
+        bulkProcessor.flushWhileQuiesced(() -> {
+            try {
+                ensureBulkSucceededSince(generation);
+            } catch (ElasticsearchClientException e) {
+                error.set(e);
+            }
+        });
+        if (error.get() != null) {
+            throw error.get();
+        }
+    }
+
+    @Override
+    public String performLowLevelRequest(String method, String endpoint, String jsonEntity)
+            throws ElasticsearchClientException {
+        return httpCall(method, endpoint, jsonEntity);
+    }
+
+    @Override
+    public ESSearchHit get(String index, String id) throws ElasticsearchClientException {
+        logger.debug("get document [{}/{}]", index, id);
+        String response = httpGet(index + ES_TYPE_DOC + id);
+
+        // Parse the response
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        ESSearchHit hit = new ESSearchHit();
+        hit.setIndex(document.read("$._index"));
+        hit.setId(document.read("$._id"));
+        hit.setVersion(Integer.toUnsignedLong(document.read("$._version")));
+        hit.setSource(extractJsonFromPath(document, "$._source"));
+        return hit;
+    }
+
+    @Override
+    public boolean exists(String index, String id) throws ElasticsearchClientException {
+        logger.debug("get document [{}/{}]", index, id);
+        try {
+            httpHead(index + ES_TYPE_DOC + id);
+            logger.debug("document [{}/{}] exists", index, id);
+            return true;
+        } catch (NotFoundException e) {
+            logger.debug("document [{}/{}] does not exist", index, id);
+            return false;
+        }
+    }
+
+    @Override
+    public String bulk(String index, String ndjson) throws ElasticsearchClientException {
+        String path = index == null ? "_bulk" : index + PATH_DELIMITER + "_bulk";
+        logger.debug("bulk a ndjson of {} characters to [{}]", ndjson.length(), path);
+        // Same retry policy as _search: 5xx/429 with elasticsearch.retry_*. Safe because FSCrawler always sets _id.
+        return httpPostWithRetry(path, ndjson);
+    }
+
+    /**
+     * Throws if a previous bulk request failed after HTTP retries were exhausted. Does not clear the failure so a
+     * concurrent REST {@code ensureBulkSucceeded()} cannot hide it from the crawl (and vice versa).
+     *
+     * @throws ElasticsearchClientException when a fatal bulk failure was recorded
+     */
+    @Override
+    public void ensureBulkSucceeded() throws ElasticsearchClientException {
+        Exception failure = fatalBulkFailure.get();
+        if (failure != null) {
+            throw new ElasticsearchClientException("Bulk indexing failed after retries", failure);
+        }
+    }
+
+    @Override
+    public long getBulkFailureGeneration() {
+        return bulkFailureGeneration.get();
+    }
+
+    @Override
+    public void ensureBulkSucceededSince(long generation) throws ElasticsearchClientException {
+        if (bulkFailureGeneration.get() != generation) {
+            Exception failure = fatalBulkFailure.get();
+            throw new ElasticsearchClientException(
+                    "Bulk indexing failed after retries",
+                    failure != null ? failure : new ElasticsearchClientException("Bulk indexing failed after retries"));
+        }
+        ensureBulkSucceeded();
+    }
+
+    @Override
+    public void clearFatalBulkFailure() {
+        // Clears the sticky flag only — generation is intentionally kept so concurrent REST can still detect the event.
+        fatalBulkFailure.set(null);
+    }
+
+    @Override
+    public String generateApiKey(String keyName) throws ElasticsearchClientException {
+        String request = "{\"name\":\"" + keyName + "\"}";
+        logger.debug("delete any existing api key for [{}]", keyName);
+        httpDelete(API_SECURITY_API_KEY, request);
+
+        logger.debug("generate an api key for [{}]", keyName);
+        String response = httpPost(API_SECURITY_API_KEY, request);
+
+        // Parse the response
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        String id = document.read("$.id");
+        String encodedApiKey = document.read("$.encoded");
+        logger.debug("generated key [{}] for [{}]: [{}]", id, keyName, encodedApiKey);
+        return encodedApiKey;
+    }
+
+    @Override
+    public boolean isSemanticSupported() {
+        return semanticSearch;
+    }
+
+    /**
+     * Read a field from a JSON document as a JSON String content
+     *
+     * @param context the document context
+     * @param path path to access the field. Like "$.field"
+     * @return the JSON as a String
+     * @see fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil#parseJsonAsDocumentContext(String) to get a document
+     *     context
+     */
+    private static String extractJsonFromPath(DocumentContext context, String path) {
+        Map<String, Object> jsonMap = context.read(path);
+        return JsonUtil.serialize(jsonMap);
+    }
+
+    void httpHead(String path) throws ElasticsearchClientException {
+        httpCallWithRetry("HEAD", path, null);
+    }
+
+    @SafeVarargs
+    final String httpGet(String path, Map.Entry<String, Object>... params) throws ElasticsearchClientException {
+        return httpCallWithRetry("GET", path, null, params);
+    }
+
+    @SafeVarargs
+    final String httpPost(String path, Object data, Map.Entry<String, Object>... params)
+            throws ElasticsearchClientException {
+        return httpCall("POST", path, data, params);
+    }
+
+    /**
+     * Execute an idempotent POST request with retry logic (e.g. {@code _search}, {@code _bulk}). Retries on 5xx and 429
+     * with the same policy as {@link #httpCallWithRetry}.
+     */
+    @SafeVarargs
+    final String httpPostWithRetry(String path, Object data, Map.Entry<String, Object>... params)
+            throws ElasticsearchClientException {
+        return httpCallWithRetry("POST", path, data, params);
+    }
+
+    @SuppressWarnings("UnusedReturnValue")
+    @SafeVarargs
+    final String httpPut(String path, Object data, Map.Entry<String, Object>... params)
+            throws ElasticsearchClientException {
+        return httpCall("PUT", path, data, params);
+    }
+
+    private String httpDelete(String path, Object data) throws ElasticsearchClientException {
+        return httpCall("DELETE", path, data);
+    }
+
+    /**
+     * Execute an HTTP call with retry logic for idempotent requests (GET, HEAD, and read-only POST such as
+     * {@code _search}). Retries on 5xx, 429, and a cold-start 404 on {@code GET /} using {@code elasticsearch.retry_*}
+     * (defaults: 500ms–30s backoff, max 5m).
+     *
+     * <p>Uses a single-threaded loop rather than Awaitility so the retry window does not interrupt an in-flight HTTP
+     * call. A retryable error is always retried at least once, even if the first attempt already consumed
+     * {@code maxDuration}.
+     *
+     * @param method HTTP method (GET, HEAD, or idempotent POST)
+     * @param path the path to call
+     * @param data the data to send (should be null for GET/HEAD)
+     * @param params optional query parameters
+     * @return the response body as a String (null for HEAD requests)
+     * @throws ElasticsearchClientException if all retries fail or a non-retryable error occurs
+     */
+    @SafeVarargs
+    private String httpCallWithRetry(String method, String path, Object data, Map.Entry<String, Object>... params)
+            throws ElasticsearchClientException {
+        return executeWithRetry(method, path, data, retryMaxDuration, retryInitialDelay, retryMaxDelay, params);
+    }
+
+    @SafeVarargs
+    private String executeWithRetry(
+            String method,
+            String path,
+            Object data,
+            Duration maxDuration,
+            Duration initialDelay,
+            Duration maxDelay,
+            Map.Entry<String, Object>... params)
+            throws ElasticsearchClientException {
+        long deadlineNanos = System.nanoTime() + maxDuration.toNanos();
+        Duration nextDelay = initialDelay;
+        Throwable lastError = null;
+        String lastErrorDetail = null;
+        int attempts = 0;
+
+        while (true) {
+            attempts++;
+            try {
+                return httpCall(method, path, data, params);
+            } catch (WebApplicationException e) {
+                int status = e.getResponse().getStatus();
+                boolean isServerError =
+                        e.getResponse().getStatusInfo().getFamily() == Response.Status.Family.SERVER_ERROR;
+                boolean isTooManyRequests = status == Response.Status.TOO_MANY_REQUESTS.getStatusCode();
+                boolean isRootNotFound =
+                        status == Response.Status.NOT_FOUND.getStatusCode() && (path == null || path.isEmpty());
+
+                if (!(isServerError || isTooManyRequests || isRootNotFound)) {
+                    throw e;
+                }
+
+                lastError = e;
+                lastErrorDetail = describeHttpError(e);
+                if (isRootNotFound) {
+                    logger.warn("Root endpoint answered 404. The cluster might still be cold." + " Retrying...");
+                } else if (isTooManyRequests) {
+                    logger.warn(
+                            "Rate limited (429) on {} {}. {}. Retrying in up to {}...",
+                            method,
+                            path == null ? "" : path,
+                            lastErrorDetail,
+                            maxDelay);
+                } else {
+                    logger.warn(
+                            "Server error on {} {}. {}. Retrying...",
+                            method,
+                            path == null ? "" : path,
+                            lastErrorDetail);
+                }
+            } catch (ElasticsearchClientException e) {
+                // Connection errors should not be retried (httpCall already handles node failover).
+                throw e;
+            }
+
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                if (attempts >= 2) {
+                    throw retriesExhausted(method, path, maxDuration, lastError, lastErrorDetail);
+                }
+                // First call consumed the whole budget (slow node / CI). Still retry once immediately.
+                continue;
+            }
+
+            long sleepNanos = Math.min(nextDelay.toNanos(), remainingNanos);
+            if (sleepNanos > 0) {
+                try {
+                    TimeUnit.NANOSECONDS.sleep(sleepNanos);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new ElasticsearchClientException(
+                            "Retries interrupted for " + method + " " + (path == null ? "" : path), ie);
+                }
+            }
+            Duration doubled = nextDelay.multipliedBy(2);
+            nextDelay = doubled.compareTo(maxDelay) > 0 ? maxDelay : doubled;
+        }
+    }
+
+    private ElasticsearchClientException retriesExhausted(
+            String method, String path, Duration maxDuration, Throwable lastError, String lastErrorDetail) {
+        String detail = lastErrorDetail != null ? lastErrorDetail : formatLastRetryError(lastError);
+        logger.error(
+                "Retries exhausted for {} {} after {}. Last error: {}",
+                method,
+                path == null ? "" : path,
+                maxDuration,
+                detail);
+        return new ElasticsearchClientException(
+                "Retries exhausted for " + method + " " + (path == null ? "" : path) + ". Last error: " + detail,
+                lastError);
+    }
+
+    /**
+     * Build a short, user-visible description of an HTTP error (status + reason + response body when available).
+     *
+     * <p>Reads the response entity once; subsequent reads may be empty.
+     */
+    static String describeHttpError(WebApplicationException e) {
+        Response response = e.getResponse();
+        int status = response.getStatus();
+        String reason =
+                response.getStatusInfo() != null ? response.getStatusInfo().getReasonPhrase() : null;
+        String body = readResponseBodySafely(response);
+        if (body != null) {
+            body = body.strip();
+        }
+        StringBuilder detail = new StringBuilder();
+        detail.append("HTTP ").append(status);
+        if (reason != null && !reason.isBlank()) {
+            detail.append(' ').append(reason);
+        }
+        if (body != null && !body.isBlank()) {
+            detail.append(": ").append(truncateForLog(body, 500));
+        }
+        return detail.toString();
+    }
+
+    private static String formatLastRetryError(Throwable lastError) {
+        if (lastError == null) {
+            return "no response received within the retry window (request may still have been in flight)";
+        }
+        if (lastError instanceof WebApplicationException wae) {
+            // Entity may already have been consumed; fall back to message if body is gone.
+            String described = describeHttpError(wae);
+            if (described.contains(": ")) {
+                return described;
+            }
+            String message = wae.getMessage();
+            return message != null && !message.isBlank() ? message : described;
+        }
+        String message = lastError.getMessage();
+        if (message != null && !message.isBlank()) {
+            return message;
+        }
+        return lastError.getClass().getName();
+    }
+
+    private static String readResponseBodySafely(Response response) {
+        try {
+            if (response != null && response.hasEntity()) {
+                return response.readEntity(String.class);
+            }
+        } catch (Exception e) {
+            // Entity already consumed or not readable — ignore.
+        }
+        return null;
+    }
+
+    private static String truncateForLog(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength) + "...";
+    }
+
+    @SafeVarargs
+    private String httpCall(String method, String localPath, Object data, Map.Entry<String, Object>... params)
+            throws ElasticsearchClientException {
+        String node = getNode();
+        String path = localPath;
+        if (settings.getElasticsearch().getPathPrefix() != null) {
+            path = settings.getElasticsearch().getPathPrefix() + PATH_DELIMITER + localPath;
+        }
+        logger.trace("Calling {} {}/{} with params {}", method, node, path == null ? "" : path, params);
+        try {
+            Invocation.Builder callBuilder = prepareHttpCall(node, path, params);
+            return invokeHttp(callBuilder, method, node, path, data);
+        } catch (WebApplicationException e) {
+            // Don't read the entity here — executeWithRetry / callers need it for error details.
+            if (e.getResponse().getStatusInfo().getFamily() == Response.Status.Family.SERVER_ERROR) {
+                logger.debug(
+                        "Server-side HTTP error on {} {}/{}: {}",
+                        method,
+                        node,
+                        path == null ? "" : path,
+                        e.getResponse().getStatus());
+            } else {
+                logger.trace(
+                        "Error while running {} {}/{}: HTTP {}",
+                        method,
+                        node,
+                        path == null ? "" : path,
+                        e.getResponse().getStatus());
+            }
+            throw e;
+        } catch (ProcessingException e) {
+            if (e.getCause() instanceof ConnectException && initialHosts.size() > 1) {
+                // Test with non-existing nodes.
+                logger.warn("We can not connect to {}. Let's try to find another one if available.", node);
+                // Remove the node from the list and try again
+                removeNode();
+                return httpCall(method, path, data, params);
+            } else {
+                throw new ElasticsearchClientException(
+                        "Can not execute " + method + " " + node
+                                + "/" + (path == null ? "" : path) + " : "
+                                + e.getCause().getMessage(),
+                        e);
+            }
+        }
+    }
+
+    private String invokeHttp(Invocation.Builder callBuilder, String method, String node, String path, Object data) {
+        if (data == null) {
+            String response = callBuilder.method(method, String.class);
+            logger.trace("{} {}/{} gives {}", method, node, path == null ? "" : path, response);
+            return response;
+        }
+        String response = callBuilder.method(method, Entity.json(data), String.class);
+        logger.trace("{} {}/{} gives {}", method, node, path == null ? "" : path, response);
+        return response;
+    }
+
+    /**
+     * Choose a node
+     *
+     * @return the selected node
+     * @throws ElasticsearchClientException if no node is running
+     */
+    private synchronized String getNode() throws ElasticsearchClientException {
+        reloadNodesIfNeeded();
+        if (hosts.isEmpty()) {
+            // We don't have any running node available
+            // TODO Our last chance is to try to ping again the original list of nodes
+            throw new ElasticsearchClientException("All nodes are failing. You need to check your configuration and "
+                    + "your Elasticsearch cluster which should be running at " + initialHosts);
+        }
+
+        if (hosts.size() > 1) {
+            ++currentNode;
+            // Optimization. If we have only one node, there's no need to compute anything
+            if (currentNode >= hosts.size()) {
+                currentNode = 0;
+            }
+
+            String node = hosts.get(currentNode);
+            logger.debug(
+                    "More than one node is available so we pick node number {} from {}: {}.", currentNode, hosts, node);
+            return node;
+        }
+
+        // We have only one node. We just return it.
+        return hosts.get(0);
+    }
+
+    private void reloadNodesIfNeeded() {
+        currentRun++;
+        if (hosts.size() != initialHosts.size() && currentRun >= CHECK_NODES_EVERY) {
+            // We don't have the initial list of nodes.
+            // Let reintroduce all the nodes
+            currentRun = 0;
+            currentNode = -1;
+            hosts.clear();
+
+            // TODO be a bit smarter and just add nodes that are actually available
+            hosts.addAll(initialHosts);
+
+            logger.trace("We are adding back again all the nodes: {}", hosts);
+        }
+    }
+
+    private synchronized void removeNode() {
+        logger.debug("Removing node {}.", hosts.get(currentNode));
+        hosts.remove(currentNode);
+        logger.trace("List of remaining nodes {}.", hosts);
+    }
+
+    private Invocation.Builder prepareHttpCall(String node, String path, Map.Entry<String, Object>[] params) {
+        WebTarget target = client.target(node);
+        if (path != null) {
+            target = target.path(path);
+        }
+        for (Map.Entry<String, Object> param : params) {
+            target = target.queryParam(param.getKey(), param.getValue());
+        }
+
+        Invocation.Builder builder =
+                target.request(MediaType.APPLICATION_JSON).header(HttpHeaders.CONTENT_TYPE, "application/json");
+        builder.header(HttpHeaders.USER_AGENT, USER_AGENT);
+        if (authorizationHeader != null) {
+            builder.header(HttpHeaders.AUTHORIZATION, authorizationHeader);
+        }
+
+        return builder;
+    }
+}

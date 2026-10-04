@@ -1,0 +1,66 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.beans;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import java.io.IOException;
+import java.time.Instant;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+class FsJobParserTest extends AbstractFSCrawlerTestCase {
+    private static final Logger logger = LogManager.getLogger();
+
+    private void jobTester(FsJob source) throws IOException {
+        String json = JsonUtil.prettyMapper.writeValueAsString(source);
+
+        logger.info("-> generated job: [{}]", json);
+        FsJob generated = JsonUtil.prettyMapper.readValue(json, FsJob.class);
+        Assertions.assertThat(generated).isEqualTo(source);
+    }
+
+    @Test
+    void parseEmptyJob() throws IOException {
+        jobTester(new FsJob());
+    }
+
+    @Test
+    void parseJob() throws IOException {
+        jobTester(new FsJob(jobName, Instant.now(), Instant.now(), 1000, 5));
+    }
+
+    /**
+     * We check that the date which is generated on disk does not change when we read it again
+     *
+     * @throws IOException In case of serialization problem
+     */
+    @Test
+    void dateTimeSerialization() throws IOException {
+        Instant now = Instant.now();
+        FsJob job = new FsJob(jobName, now, now, 1000, 5);
+        String json = JsonUtil.prettyMapper.writeValueAsString(job);
+        FsJob generated = JsonUtil.prettyMapper.readValue(json, FsJob.class);
+        Assertions.assertThat(generated.getLastrun()).isEqualTo(now);
+    }
+}

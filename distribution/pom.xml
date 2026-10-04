@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>fr.pilato.elasticsearch.crawler</groupId>
+        <artifactId>fscrawler-parent</artifactId>
+        <version>3.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>fscrawler-distribution</artifactId>
+    <name>FSCrawler ZIP Distribution</name>
+    <url>https://github.com/dadoonet/fscrawler/</url>
+    <scm>
+        <connection>scm:git:git@github.com:dadoonet/fscrawler.git</connection>
+        <developerConnection>scm:git:git@github.com:dadoonet/fscrawler.git</developerConnection>
+        <url>scm:git:git@github.com:dadoonet/fscrawler.git</url>
+    </scm>
+
+    <properties>
+        <!-- Global configuration parameters for docker -->
+        <!-- By default, build docker images on each module. -->
+        <!--suppress UnresolvedMavenProperty -->
+        <docker.skip>${env.DOCKER_SKIP}</docker.skip>
+        <docker.username>dadoonet</docker.username>
+
+        <!-- Docker Image Definitions -->
+        <!-- standard installation with no ocr -->
+        <docker.noocr.alias>${project.artifactId}-noocr</docker.noocr.alias>
+        <docker.noocr.name>${docker.username}/fscrawler:${project.version}-noocr</docker.noocr.name>
+        <docker.noocr.cacheFrom>${docker.noocr.name}</docker.noocr.cacheFrom>
+        <docker.noocr.dockerFile>${project.basedir}/src/main/docker/Dockerfile</docker.noocr.dockerFile>
+        <docker.noocr.assembly.descriptor>${project.basedir}/src/main/assembly/assembly.xml</docker.noocr.assembly.descriptor>
+        <docker.noocr.assembly.mode>tgz</docker.noocr.assembly.mode>
+        <!-- SNAPSHOT: snapshot-noocr. Release (-Prelease): noocr. -->
+        <docker.noocr.tags.0>${docker.noocr.alias.tag}</docker.noocr.tags.0>
+        <docker.noocr.buildx.platforms.0>linux/amd64</docker.noocr.buildx.platforms.0>
+        <docker.noocr.buildx.platforms.1>linux/arm64</docker.noocr.buildx.platforms.1>
+
+        <!-- install tesseract-ocr and all language files -->
+        <docker.ocr.alias>${project.artifactId}-ocr</docker.ocr.alias>
+        <docker.ocr.name>${docker.username}/fscrawler:${project.version}-ocr</docker.ocr.name>
+        <docker.ocr.cacheFrom>${docker.ocr.name}</docker.ocr.cacheFrom>
+        <docker.ocr.dockerFile>${project.basedir}/src/main/docker/Dockerfile.ocr</docker.ocr.dockerFile>
+        <docker.ocr.assembly.descriptor>${docker.noocr.assembly.descriptor}</docker.ocr.assembly.descriptor>
+        <docker.ocr.assembly.mode>${docker.noocr.assembly.mode}</docker.ocr.assembly.mode>
+        <docker.ocr.args.langsPkg>imagemagick tesseract-ocr tesseract-ocr-all</docker.ocr.args.langsPkg>
+        <!-- :VERSION always. Floating alias is snapshot on SNAPSHOT builds, latest on -Prelease. -->
+        <docker.ocr.tags.0>${project.version}</docker.ocr.tags.0>
+        <docker.ocr.tags.1>${docker.ocr.alias.tag}</docker.ocr.tags.1>
+        <docker.ocr.buildx.platforms.0>linux/amd64</docker.ocr.buildx.platforms.0>
+        <docker.ocr.buildx.platforms.1>linux/arm64</docker.ocr.buildx.platforms.1>
+
+        <distribution.mainClassName>fr.pilato.elasticsearch.crawler.fs.cli.FsCrawler</distribution.mainClassName>
+        <!-- Relative path from distribution/test-scripts/ back to the project root.
+             Used by Maven resource filtering in the test scripts. -->
+        <test.scripts.root.relative.path>../..</test.scripts.root.relative.path>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>fr.pilato.elasticsearch.crawler</groupId>
+            <artifactId>fscrawler-cli</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>fr.pilato.elasticsearch.crawler</groupId>
+            <artifactId>fscrawler-elasticsearch-client</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>fr.pilato.elasticsearch.crawler</groupId>
+            <artifactId>fscrawler-test-framework</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <resource>
+                <filtering>true</filtering>
+                <directory>src/main/resources</directory>
+            </resource>
+        </resources>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-help-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <executions>
+                    <!-- Filter test scripts and write them next to src/ (like contrib .env files).
+                         Regenerate after a version bump: mvn generate-test-resources -pl distribution -->
+                    <execution>
+                        <id>filter-test-scripts</id>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <phase>generate-test-resources</phase>
+                        <configuration>
+                            <outputDirectory>${project.basedir}/test-scripts</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>src/test/scripts</directory>
+                                    <filtering>true</filtering>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Set executable bit on filtered test scripts (copy-resources does not preserve it) -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>chmod-test-scripts</id>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <phase>generate-test-resources</phase>
+                        <configuration>
+                            <target>
+                                <chmod file="${project.basedir}/test-scripts/test-fscrawler-cli.sh" perm="755"/>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>versions-maven-plugin</artifactId>
+            </plugin>
+            <!-- Add/Edit items in META-INF/MANIFEST.MF -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>${distribution.mainClassName}</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+            </plugin>
+
+            <!-- Download the Elastic OTel javaagent into target/otel-agent/ for bundling in the ZIP -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>download-elastic-otel-agent</id>
+                        <goals>
+                            <goal>copy</goal>
+                        </goals>
+                        <phase>generate-resources</phase>
+                        <configuration>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>co.elastic.otel</groupId>
+                                    <artifactId>elastic-otel-javaagent</artifactId>
+                                    <version>${elastic.otel.agent.version}</version>
+                                    <type>jar</type>
+                                    <overWrite>false</overWrite>
+                                    <outputDirectory>${project.build.directory}/otel-agent</outputDirectory>
+                                    <destFileName>elastic-otel-javaagent-${elastic.otel.agent.version}.jar</destFileName>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- Generate the release zip file (run during package step) -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-assembly-plugin</artifactId>
+                <configuration>
+                    <appendAssemblyId>false</appendAssemblyId>
+                    <descriptors>
+                        <descriptor>src/main/assembly/assembly.xml</descriptor>
+                    </descriptors>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>generate-release-plugin</id>
+                        <goals>
+                            <goal>single</goal>
+                        </goals>
+                        <phase>package</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <!-- Flatten the POM into a self-contained document (no parent, resolved versions). -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>flatten-maven-plugin</artifactId>
+                <configuration>
+                    <flattenMode>oss</flattenMode>
+                    <updatePomFile>true</updatePomFile>
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>flatten</id>
+                        <goals>
+                            <goal>flatten</goal>
+                        </goals>
+                        <phase>process-resources</phase>
+                    </execution>
+                    <execution>
+                        <id>flatten.clean</id>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                        <phase>clean</phase>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-install-plugin</artifactId>
+                <configuration>
+                    <skip>true</skip>
+                </configuration>
+            </plugin>
+            <!-- Generate and push the docker images -->
+            <plugin>
+                <groupId>io.fabric8</groupId>
+                <artifactId>docker-maven-plugin</artifactId>
+                <configuration>
+                    <!-- Create multiple images -->
+                    <images combine.self="override">
+                        <image>
+                            <external>
+                                <type>properties</type>
+                                <prefix>docker.noocr</prefix>
+                            </external>
+                        </image>
+                        <image>
+                            <external>
+                                <type>properties</type>
+                                <prefix>docker.ocr</prefix>
+                            </external>
+                        </image>
+                    </images>
+                </configuration>
+                <executions>
+                    <!-- Generate the docker images during the "install" phase -->
+                    <execution>
+                        <id>docker-build</id>
+                        <goals>
+                            <goal>build</goal>
+                        </goals>
+                        <phase>install</phase>
+                    </execution>
+                    <!-- Push the docker images during the "deploy" phase -->
+                    <execution>
+                        <id>docker-push</id>
+                        <goals>
+                            <goal>push</goal>
+                        </goals>
+                        <phase>deploy</phase>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

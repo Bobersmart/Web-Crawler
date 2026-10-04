@@ -1,0 +1,82 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.client;
+
+import com.jayway.jsonpath.DocumentContext;
+import fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.bulk.FsCrawlerBulkResponse;
+import java.util.List;
+import java.util.Map;
+
+public class ElasticsearchBulkResponse extends FsCrawlerBulkResponse<ElasticsearchOperation> {
+
+    private final ElasticsearchClientException exception;
+
+    public ElasticsearchBulkResponse(ElasticsearchClientException exception) {
+        this.exception = exception;
+        // Whole-request failures (HTTP 429/5xx after retries, connection errors, …) must not look like success.
+        this.errors = true;
+    }
+
+    public ElasticsearchBulkResponse(String response) {
+        exception = null;
+        DocumentContext document = JsonUtil.parseJsonAsDocumentContext(response);
+        List<Map<String, Object>> responseItems = document.read("$.items");
+        for (Map<String, Object> responseItem : responseItems) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> jsonItemResponse = (Map<String, Object>)
+                    responseItem.entrySet().iterator().next().getValue();
+            String index = (String) jsonItemResponse.get("_index");
+            String id = (String) jsonItemResponse.get("_id");
+            BulkItemResponse<ElasticsearchOperation> itemResponse = new BulkItemResponse<>();
+            itemResponse.setOperation(new ElasticsearchIndexOperation(index, id, null, null));
+            @SuppressWarnings("unchecked")
+            Map<String, Object> error = (Map<String, Object>) jsonItemResponse.get("error");
+            if (error != null) {
+                String errorMessage = (String) error.get("reason");
+                if (!"version_conflict_engine_exception".equals(error.get("type"))) {
+                    itemResponse.setFailureMessage(errorMessage);
+                    itemResponse.setFailed(true);
+                }
+            }
+            items.add(itemResponse);
+        }
+        errors = items.stream().anyMatch(BulkItemResponse::isFailed);
+    }
+
+    /** The transport-level failure when the whole {@code _bulk} call failed; {@code null} for item-level failures. */
+    public ElasticsearchClientException getException() {
+        return exception;
+    }
+
+    @Override
+    public boolean hasFailures() {
+        return exception != null || super.hasFailures();
+    }
+
+    @Override
+    public Throwable buildFailureMessage() {
+        if (exception != null) {
+            return exception;
+        }
+        return super.buildFailureMessage();
+    }
+}

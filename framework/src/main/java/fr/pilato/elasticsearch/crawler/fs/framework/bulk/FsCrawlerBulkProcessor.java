@@ -1,0 +1,312 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.framework.bulk;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.ByteSizeValue;
+import fr.pilato.elasticsearch.crawler.fs.framework.TimeValue;
+import fr.pilato.elasticsearch.crawler.fs.framework.tracing.FsCrawlerTracing;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Scope;
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Supplier;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
+/** Bulk processor */
+public class FsCrawlerBulkProcessor<
+                O extends FsCrawlerOperation<O>, Q extends FsCrawlerBulkRequest<O>, S extends FsCrawlerBulkResponse<O>>
+        implements Closeable {
+
+    private static final Logger logger = LogManager.getLogger();
+
+    private final int bulkActions;
+    private final ByteSizeValue byteSize;
+    private final Listener<O, Q, S> listener;
+    private final Engine<O, Q, S> engine;
+    private Q bulkRequest;
+    private final Supplier<Q> requestSupplier;
+    private final ScheduledExecutorService executor;
+    private volatile boolean closed = false;
+    private final AtomicLong executionIdGen = new AtomicLong();
+    /** Guards {@link #inFlightExecutions} so {@link #flush()} can wait for timer-triggered bulks to finish. */
+    private final Object inFlightMonitor = new Object();
+
+    private int inFlightExecutions = 0;
+    /**
+     * When true, only the thread holding {@link #quiesceLock} may start a new bulk execute. The flush-interval timer
+     * and size-triggered flushes from {@link #add} are suppressed so flush+ensure is atomic.
+     */
+    private final AtomicBoolean quiesced = new AtomicBoolean();
+    /** Exclusive lock so crawl-end and REST cannot interleave two {@link #flushWhileQuiesced} calls. */
+    private final ReentrantLock quiesceLock = new ReentrantLock();
+
+    private FsCrawlerBulkProcessor(
+            Engine<O, Q, S> engine,
+            Listener<O, Q, S> listener,
+            int bulkActions,
+            ByteSizeValue byteSize,
+            Supplier<Q> requestSupplier,
+            ScheduledExecutorService executor) {
+        this.engine = engine;
+        this.listener = listener;
+        this.bulkActions = bulkActions;
+        this.byteSize = byteSize;
+        this.requestSupplier = requestSupplier;
+        this.bulkRequest = supplyRequestWithLimits(requestSupplier, bulkActions, byteSize);
+        this.executor = executor;
+    }
+
+    @Override
+    public void close() throws IOException {
+        try {
+            internalClose();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException(e);
+        }
+    }
+
+    private void internalClose() throws InterruptedException {
+        if (closed) {
+            return;
+        }
+        closed = true;
+
+        if (executor != null) {
+            logger.debug("Closing BulkProcessor");
+            executor.shutdown();
+            if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+                logger.warn("We waited for the bulk processor shutdown but it did not close properly. "
+                        + "We might be missing some documents.");
+            }
+            logger.debug("BulkProcessor is now closed");
+        }
+
+        if (bulkRequest.numberOfActions() > 0) {
+            logger.debug("Executing [{}] remaining actions", bulkRequest.numberOfActions());
+            execute();
+        }
+    }
+
+    /**
+     * Add a request to the processor
+     *
+     * @param request request to add
+     * @return this so we can link methods.
+     */
+    public synchronized FsCrawlerBulkProcessor<O, Q, S> add(O request) {
+        ensureOpen();
+        bulkRequest.add(request);
+        executeIfNeeded();
+        return this;
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException("bulk process already closed");
+        }
+    }
+
+    private void executeIfNeeded() {
+        ensureOpen();
+        if (isQuiescedForOtherThreads()) {
+            return;
+        }
+        if (bulkRequest.isOverTheLimit()) {
+            execute();
+        }
+    }
+
+    private void executeWhenNeeded() {
+        ensureOpen();
+        if (isQuiescedForOtherThreads()) {
+            return;
+        }
+        if (bulkRequest.numberOfActions() > 0) {
+            execute();
+        }
+    }
+
+    private boolean isQuiescedForOtherThreads() {
+        return quiesced.get() && !quiesceLock.isHeldByCurrentThread();
+    }
+
+    private void execute() {
+        final Q br = this.bulkRequest;
+        this.bulkRequest = supplyRequestWithLimits(requestSupplier, bulkActions, byteSize);
+        final long executionId = executionIdGen.incrementAndGet();
+
+        synchronized (inFlightMonitor) {
+            inFlightExecutions++;
+        }
+
+        Span bulkSpan = FsCrawlerTracing.startSpan("fscrawler.es.bulk");
+        bulkSpan.setAttribute("es.bulk.actions", br.numberOfActions());
+
+        // execute in a blocking fashion...
+        boolean afterCalled = false;
+        try (Scope ignored = bulkSpan.makeCurrent()) {
+            listener.beforeBulk(executionId, br);
+            S bulkItemResponses = engine.bulk(br);
+            afterCalled = true;
+            listener.afterBulk(executionId, br, bulkItemResponses);
+        } catch (Exception e) {
+            bulkSpan.recordException(e);
+            bulkSpan.setStatus(
+                    StatusCode.ERROR,
+                    e.getMessage() != null ? e.getMessage() : e.getClass().getName());
+            if (!afterCalled) {
+                listener.afterBulk(executionId, br, e);
+            }
+        } finally {
+            bulkSpan.end();
+            synchronized (inFlightMonitor) {
+                inFlightExecutions--;
+                inFlightMonitor.notifyAll();
+            }
+        }
+    }
+
+    Q supplyRequestWithLimits(Supplier<Q> requestSupplier, int bulkActions, ByteSizeValue byteSize) {
+        Q br = requestSupplier.get();
+        br.maxNumberOfActions(bulkActions);
+        br.maxBulkSize(byteSize);
+        return br;
+    }
+
+    public Listener<O, Q, S> getListener() {
+        return listener;
+    }
+
+    /**
+     * Flush pending actions if any, then wait for any in-flight bulk (including one started by the flush interval
+     * timer) to finish. No-op HTTP when the queue is empty so callers do not POST an empty {@code _bulk} body.
+     */
+    public void flush() {
+        executeWhenNeeded();
+        awaitInFlightExecutions();
+    }
+
+    /**
+     * Exclusively suppress concurrent timer/size-triggered executes, drain until idle (including retry re-queues), then
+     * run {@code action} before releasing quiesce. Closes the race where a bulk starts after {@link #flush()} and fails
+     * after ensure.
+     *
+     * @param action runs after the processor is idle (no pending actions, no in-flight execute)
+     */
+    public void flushWhileQuiesced(Runnable action) {
+        quiesceLock.lock();
+        try {
+            quiesced.set(true);
+            try {
+                // Drain until empty: afterBulk retry listeners may re-queue under the bulk-size threshold.
+                do {
+                    executeWhenNeeded();
+                    awaitInFlightExecutions();
+                } while (bulkRequest.numberOfActions() > 0);
+                action.run();
+            } finally {
+                quiesced.set(false);
+            }
+        } finally {
+            quiesceLock.unlock();
+        }
+    }
+
+    private void awaitInFlightExecutions() {
+        synchronized (inFlightMonitor) {
+            while (inFlightExecutions > 0) {
+                try {
+                    inFlightMonitor.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    // Do not return while a bulk is still in flight: callers would run ensureBulkSucceeded()
+                    // too early and miss a fatal HTTP failure recorded by the completing bulk.
+                    throw new IllegalStateException("Interrupted while waiting for in-flight bulk execution(s)", e);
+                }
+            }
+        }
+    }
+
+    public static class Builder<
+            O extends FsCrawlerOperation<O>, Q extends FsCrawlerBulkRequest<O>, S extends FsCrawlerBulkResponse<O>> {
+
+        private int bulkActions;
+        private TimeValue flushInterval;
+        private ByteSizeValue byteSize;
+        private final Engine<O, Q, S> engine;
+        private final Listener<O, Q, S> listener;
+        private final Supplier<Q> requestSupplier;
+
+        public Builder(Engine<O, Q, S> engine, Listener<O, Q, S> listener, Supplier<Q> requestSupplier) {
+            this.engine = engine;
+            this.listener = listener;
+            this.requestSupplier = requestSupplier;
+        }
+
+        public Builder<O, Q, S> setBulkActions(int bulkActions) {
+            this.bulkActions = bulkActions;
+            return this;
+        }
+
+        public Builder<O, Q, S> setFlushInterval(TimeValue flushInterval) {
+            this.flushInterval = flushInterval;
+            return this;
+        }
+
+        public Builder<O, Q, S> setByteSize(ByteSizeValue byteSizeValue) {
+            this.byteSize = byteSizeValue;
+            return this;
+        }
+
+        public FsCrawlerBulkProcessor<O, Q, S> build() {
+            ScheduledExecutorService exec = flushInterval != null ? Executors.newScheduledThreadPool(1) : null;
+            var processor =
+                    new FsCrawlerBulkProcessor<>(engine, listener, bulkActions, byteSize, requestSupplier, exec);
+            processor.listener.setBulkProcessor(processor);
+            if (exec != null) {
+                exec.scheduleWithFixedDelay(
+                        processor::executeWhenNeeded, 0, flushInterval.millis(), TimeUnit.MILLISECONDS);
+            }
+            return processor;
+        }
+    }
+
+    public interface Listener<
+            O extends FsCrawlerOperation<O>, Q extends FsCrawlerBulkRequest<O>, S extends FsCrawlerBulkResponse<O>> {
+
+        void beforeBulk(long executionId, Q request);
+
+        void afterBulk(long executionId, Q request, S response);
+
+        void afterBulk(long executionId, Q request, Throwable failure);
+
+        void setBulkProcessor(FsCrawlerBulkProcessor<O, Q, S> bulkProcessor);
+    }
+}

@@ -1,0 +1,186 @@
+# optional: the name of the crawler. Defaults to the job directory name.
+#name: "test"
+
+# optional: set file system crawler parameters
+fs:
+  # define a "local" file path crawler, if running inside a docker container this must be the path INSIDE the container
+  #url: "/tmp/es"
+  # optional: scan every 15 minutes for changes in url defined above
+  #update_rate: "15m"
+  # optional: define includes and excludes; "~" and ".DS_Store" files are excluded by default if not defined below
+  #includes:
+  #  - "*.doc"
+  #  - "*.xls"
+  #excludes:
+  #  - "resume.doc"
+  # optional: List regular expressions to match the content that should not be indexed
+  #filters:
+  #  - ".*foo.*"
+  #  - "^4\\d{3}([\\ \\-]?)\\d{4}\\1\\d{4}\\1\\d{4}$" # do not index files containing credit card numbers
+
+  # optional: special handling of JSON files, should only be used if ALL files are JSON
+  #json_support: "${FSCRAWLER_JSON:=false}"
+  # optional: if false, all JSON files will be added as documents, if true, they will be added as JSON objects
+  #add_as_inner_object: false
+
+  # optional: special handling of XML files, should only be used if ALL files are XML
+  #xml_support: "false"
+
+  # optional: if true, the crawler will follow symbolic links
+  #follow_symlinks: false
+  # optional: if true, the crawler will remove files found as deleted
+  #remove_deleted: true
+  # optional: if false, the crawler will stop crawling at the first error found
+  #continue_on_error: false
+  # optional: do not send big files to TIKA
+  #ignore_above: "512mb"
+
+  # optional: use filename as document _id instead of hashing the path
+  #filename_as_id: true
+
+  # Algorithm used to derive Elasticsearch document _ids from file paths (any MessageDigest name).
+  # Changing this value changes every _id and requires a full reindex.
+  # When unset, FSCrawler defaults to MD5 for backward compatibility with existing jobs.
+  # New jobs created with --setup use SHA-256.
+  hash_algorithm: "SHA-256"
+
+  # SSH (requires fs.provider: ssh). The crawl root remains fs.url.
+  #provider: ssh
+  #providers:
+  #  ssh:
+  #    hostname: localhost
+  #    port: 22
+  #    username: username
+  #    password: password@{secret}
+  #    pem_path: /path/to/privatekey.pem
+  # FTP (requires fs.provider: ftp)
+  #  ftp:
+  #    hostname: localhost
+  #    port: 21
+  #    username: anonymous
+  #    password: password@{secret}
+
+  # you may want to store (partial) content of the file (see indexed_chars)
+  #index_content: true
+
+  # include size ot file in index
+  #add_filesize: true
+
+  # include user/group of file only if needed
+  #attributes_support: false
+
+  # optional: collect file ACL entries when available (requires attributes_support)
+  #acl_support: false
+
+  # optional: this will try to detect the language of the extracted content
+  #lang_detect: false
+
+  # optional: do you REALLY want to store every file as a copy in the index? Then set this to true
+  #store_source: false
+
+  # optional: how much data from the content of the file should be indexed (and stored inside the index), set to 0 if you need checksum, but no content at all to be indexed
+  #indexed_chars: "0"
+  #indexed_chars: "10000.0"
+
+  # optional: usually file metadata will be stored in separate fields, if you want to keep the original set, set this to true
+  #raw_metadata: false
+
+  # optional: add checksum meta (requires index_content to be set to true)
+  #checksum: "MD5"
+
+  # optional: recommended, but will create another index
+  #index_folders: true
+
+  # optional: the optional path to a specific external Tika JSON configuration file
+  #tika_config_path: "/path/to/tika-config.json"
+
+  # optional: the OCR Options
+  #ocr:
+    # optional: enable or disable OCR
+    #enabled: "true"
+    # optional: language to use for OCR
+    #language: "eng"
+    # optional: path to the Tesseract binary
+    #path: "/path/to/tesseract/if/not/available/in/PATH"
+    # optional: path to the Tesseract tessdata directory
+    #data_path: "/path/to/tesseract/tessdata/if/needed"
+    # optional: the OCR output type, either txt or hocr
+    #output_type: txt
+    # optional: the OCR strategy, either auto, no_ocr, ocr_only, ocr_and_text
+    #pdf_strategy: auto
+    # optional: the mode to use for page orientation from 0 to 13
+    #page_seg_mode: 1 # automatic mode
+    # optional: if true, we will try to preserve interword spacing
+    #preserve_interword_spacing: false
+
+# optional: define password providers for protected documents
+#passwords:
+  # optional: noop (default), static, disk, chained
+  #provider: "noop"
+  #providers:
+    # optional: passwords defined inline
+    #static:
+      # optional: a single password
+      #value: "your-password@{secret}"
+      # optional: multiple passwords to try in order
+      #values:
+      #  - "your-first-password@{secret}"
+      #  - "your-second-password@{secret}"
+    # optional: load passwords from disk (defaults later to fs.url)
+    #disk:
+      #url: "/path/to/passwords"
+    # optional: chain providers by name
+    #chained:
+      #providers:
+      #  - "static"
+      #  - "disk"
+
+# optional: define metadata tags to be added to each document
+#tags:
+  # optional: if the filename is found in the directory, it will be used as a metadata
+  # content of the file will be indexed
+  #meta_filename: "meta_tags.json" # default is ".meta.yml"
+  # optional: if defined and found, all documents will have the associated metadata added
+  #static_meta_filename: "/path/to/meta_tags.json" # default is null
+
+# optional: define this if you want to change the default Elasticsearch settings/behavior
+#elasticsearch:
+  # optional: list of Elasticsearch node urls
+  #urls:
+  #  - "https://127.0.0.1:9200"
+  #  - "https://127.0.0.1:9201"
+  # optional: the index name to use. Defaults to name property + "_docs"
+  #index: "test_docs"
+  # optional: the index name to use for folders. Defaults to name property + "_folder"
+  #index_folder: "test_folder"
+  # optional: the bulk size in number of documents
+  #bulk_size: 1000
+  # optional: bulk write operation for documents: "index" (default) or "create"
+  #bulk_operation: "index"
+  # optional: the bulk flush period
+  #flush_interval: "5s"
+  # optional: max time to retry idempotent HTTP calls on 5xx/429 and cold-start 404 on GET /
+  #retry_max_duration: "5m"
+  #retry_initial_delay: "500ms"
+  #retry_max_delay: "30s"
+  # optional: the bulk size in bytes
+  #byte_size: "10mb"
+  # api key (username and password are deprecated and should not be used anymore)
+  #api_key: "YOUR_API_KEY@{secret}"
+  # optional: path to the Ca certificate if using self-signed certificates
+  #ca_certificate: "/path/to/ca.crt"
+
+  # optional: the index pipeline
+  #pipeline: "my_pipeline"
+
+  # optional: do we create/update the component and index templates when starting? Defaults to "true"
+  #push_templates: "true"
+  # optional, defaults to "true", used with Elasticsearch 8.17+ with a trial or enterprise license
+  #semantic_search: "true"
+
+# only used when started with --rest option
+#rest:
+  # optional: the URL FSCrawler will listen to.
+  #url: "http://127.0.0.1:8080"
+  # optional: if you want to enable Cross-Origin Resource Sharing
+  #enable_cors: true

@@ -1,0 +1,265 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.plugins.fs.ftp;
+
+import com.carrotsearch.randomizedtesting.jupiter.RandomizedTest;
+import fr.pilato.elasticsearch.crawler.fs.beans.FileAbstractModel;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettingsLoader;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerExtensionFsProvider;
+import java.util.Collection;
+import java.util.Locale;
+import java.util.Map;
+import org.assertj.core.api.Assertions;
+import org.assertj.core.groups.Tuple;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockftpserver.fake.FakeFtpServer;
+import org.mockftpserver.fake.UserAccount;
+import org.mockftpserver.fake.filesystem.DirectoryEntry;
+import org.mockftpserver.fake.filesystem.FileEntry;
+import org.mockftpserver.fake.filesystem.FileSystem;
+import org.mockftpserver.fake.filesystem.Permissions;
+import org.mockftpserver.fake.filesystem.UnixFakeFileSystem;
+
+@SuppressWarnings("removal")
+class FsFtpPluginTest extends AbstractFSCrawlerTestCase {
+    private FakeFtpServer fakeFtpServer;
+    private final String user = "user";
+    private final String pass = "pass";
+
+    @BeforeEach
+    void setup() {
+        fakeFtpServer = new FakeFtpServer();
+        fakeFtpServer.setServerControlPort(0);
+        fakeFtpServer.addUserAccount(new UserAccount(user, pass, "/"));
+
+        // Create a fake filesystem with the following structure:
+        /*
+        /testfile.txt
+        /nested
+            /foo.txt
+            /bar.txt
+            /buzz
+                /hello.txt
+                /world.txt
+        /permission
+            /all.txt (with all permissions)
+            /none.txt (with no permissions)
+        /subdir_with_space
+            /hello.txt
+            /world.txt
+         */
+        FileSystem fileSystem = new UnixFakeFileSystem();
+
+        // Create /testfile.txt
+        fileSystem.add(new FileEntry("/testfile.txt", "I'm a test file"));
+
+        String nestedDir = "/nested";
+        fileSystem.add(new DirectoryEntry(nestedDir));
+        fileSystem.add(new FileEntry(nestedDir + "/foo.txt", "文件名不支持中文"));
+        fileSystem.add(new FileEntry(nestedDir + "/bar.txt", "bar file"));
+
+        fileSystem.add(new DirectoryEntry(nestedDir + "/buzz"));
+        fileSystem.add(new FileEntry(nestedDir + "/buzz/hello.txt", "hello"));
+        fileSystem.add(new FileEntry(nestedDir + "/buzz/world.txt", "world"));
+
+        String permissionDir = "/permission";
+        fileSystem.add(new DirectoryEntry(permissionDir));
+        FileEntry fileAllPermissions = new FileEntry(permissionDir + "/all.txt", "123");
+        fileAllPermissions.setPermissions(Permissions.ALL);
+        fileSystem.add(fileAllPermissions);
+        FileEntry fileNonePermissions = new FileEntry(permissionDir + "/none.txt", "456");
+        fileNonePermissions.setPermissions(Permissions.NONE);
+        fileSystem.add(fileNonePermissions);
+
+        String dirWithSpaceInName = "/subdir_with_space ";
+        fileSystem.add(new DirectoryEntry(dirWithSpaceInName));
+        fileSystem.add(new FileEntry(dirWithSpaceInName + "/hello.txt", "File in dir with space at the end"));
+        fileSystem.add(new FileEntry(dirWithSpaceInName + "/world.txt", "File in dir with space at the end"));
+
+        fakeFtpServer.setFileSystem(fileSystem);
+        fakeFtpServer.start();
+    }
+
+    @AfterEach
+    void shutDown() {
+        fakeFtpServer.stop();
+    }
+
+    @Test
+    void ftpPlugin() throws Exception {
+        int port = fakeFtpServer.getServerControlPort();
+        FsSettings fsSettings = FsSettingsLoader.load();
+        fsSettings.getServer().setHostname("localhost");
+        fsSettings.getServer().setUsername(user);
+        fsSettings.getServer().setPassword(pass);
+        fsSettings.getServer().setPort(port);
+
+        FsFtpPlugin.FsCrawlerExtensionFsProviderFtp ftpPlugin = new FsFtpPlugin.FsCrawlerExtensionFsProviderFtp();
+        ftpPlugin.start(fsSettings);
+
+        try {
+            ftpPlugin.openConnection();
+
+            testFilesInDir(ftpPlugin, "/ThisPathDoesNotExist");
+            testFilesInDir(
+                    ftpPlugin,
+                    "/",
+                    Assertions.tuple(false, true, "nested", "", "/", "/nested", 0L, 777, "none", "none"),
+                    Assertions.tuple(false, true, "permission", "", "/", "/permission", 0L, 777, "none", "none"),
+                    Assertions.tuple(
+                            false, true, "subdir_with_space ", "", "/", "/subdir_with_space ", 0L, 777, "none", "none"),
+                    Assertions.tuple(
+                            true, false, "testfile.txt", "txt", "/", "/testfile.txt", 15L, 777, "none", "none"));
+            testFilesInDir(
+                    ftpPlugin,
+                    "/nested",
+                    Assertions.tuple(false, true, "buzz", "", "/nested", "/nested/buzz", 0L, 777, "none", "none"),
+                    Assertions.tuple(
+                            true, false, "foo.txt", "txt", "/nested", "/nested/foo.txt", 24L, 777, "none", "none"),
+                    Assertions.tuple(
+                            true, false, "bar.txt", "txt", "/nested", "/nested/bar.txt", 8L, 777, "none", "none"));
+            testFilesInDir(
+                    ftpPlugin,
+                    "/permission",
+                    Assertions.tuple(
+                            true,
+                            false,
+                            "all.txt",
+                            "txt",
+                            "/permission",
+                            "/permission/all.txt",
+                            3L,
+                            777,
+                            "none",
+                            "none"),
+                    Assertions.tuple(
+                            true,
+                            false,
+                            "none.txt",
+                            "txt",
+                            "/permission",
+                            "/permission/none.txt",
+                            3L,
+                            0,
+                            "none",
+                            "none"));
+            testFilesInDir(
+                    ftpPlugin,
+                    "/subdir_with_space ",
+                    Assertions.tuple(
+                            true,
+                            false,
+                            "hello.txt",
+                            "txt",
+                            "/subdir_with_space ",
+                            "/subdir_with_space /hello.txt",
+                            33L,
+                            777,
+                            "none",
+                            "none"),
+                    Assertions.tuple(
+                            true,
+                            false,
+                            "world.txt",
+                            "txt",
+                            "/subdir_with_space ",
+                            "/subdir_with_space /world.txt",
+                            33L,
+                            777,
+                            "none",
+                            "none"));
+        } finally {
+            ftpPlugin.closeConnection();
+        }
+    }
+
+    @Test
+    void getType() {
+        FsFtpPlugin.FsCrawlerExtensionFsProviderFtp ftpPlugin = new FsFtpPlugin.FsCrawlerExtensionFsProviderFtp();
+        Assertions.assertThat(ftpPlugin.getType()).isEqualTo("ftp");
+    }
+
+    @Test
+    void crawlerStartDefaultsFtpUrlOnPort21WithoutUsername() {
+        String hostname = randomToken() + ".example.com";
+        FsSettings settings = FsSettingsLoader.load();
+        settings.getFs().setProviders(Map.of("ftp", Map.of("hostname", hostname)));
+
+        FsFtpPlugin.FsCrawlerExtensionFsProviderFtp ftpPlugin = new FsFtpPlugin.FsCrawlerExtensionFsProviderFtp();
+        ftpPlugin.start(settings);
+
+        Assertions.assertThat(ftpPlugin.toFileUrl("/doc.pdf"))
+                .isEqualTo("ftp://" + hostname + ":" + FsFtpPlugin.FsCrawlerExtensionFsProviderFtp.DEFAULT_PORT
+                        + "/doc.pdf");
+    }
+
+    @Test
+    void crawlerStartRequiresHostname() {
+        FsSettings settings = FsSettingsLoader.load();
+        FsFtpPlugin.FsCrawlerExtensionFsProviderFtp ftpPlugin = new FsFtpPlugin.FsCrawlerExtensionFsProviderFtp();
+
+        Assertions.assertThatThrownBy(() -> ftpPlugin.start(settings))
+                .isInstanceOf(FsCrawlerIllegalConfigurationException.class)
+                .hasMessageContaining("fs.providers.ftp.hostname");
+    }
+
+    @Test
+    void overlayWithoutPathFails() {
+        String hostname = randomToken() + ".example.com";
+        FsSettings settings = FsSettingsLoader.load();
+        settings.getFs().setProviders(Map.of("ftp", Map.of("hostname", hostname)));
+
+        FsFtpPlugin.FsCrawlerExtensionFsProviderFtp ftpPlugin = new FsFtpPlugin.FsCrawlerExtensionFsProviderFtp();
+
+        Assertions.assertThatThrownBy(() -> ftpPlugin.start(settings, Map.of("hostname", hostname)))
+                .isInstanceOf(FsCrawlerIllegalConfigurationException.class)
+                .hasMessageContaining("ftp path is missing");
+    }
+
+    private String randomToken() {
+        return RandomizedTest.randomAsciiLettersOfLengthBetween(randomizedRandomForTests, 6, 12)
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private void testFilesInDir(FsCrawlerExtensionFsProvider plugin, String path, Tuple... values) throws Exception {
+        Assertions.assertThat(plugin.exists(path)).isEqualTo(values.length > 0);
+        Collection<FileAbstractModel> files = plugin.getFiles(path);
+        Assertions.assertThat(files).hasSize(values.length);
+        Assertions.assertThat(files)
+                .extracting(
+                        FileAbstractModel::isFile,
+                        FileAbstractModel::isDirectory,
+                        FileAbstractModel::getName,
+                        FileAbstractModel::getExtension,
+                        FileAbstractModel::getPath,
+                        FileAbstractModel::getFullpath,
+                        FileAbstractModel::getSize,
+                        FileAbstractModel::getPermissions,
+                        FileAbstractModel::getGroup,
+                        FileAbstractModel::getOwner)
+                .containsExactlyInAnyOrder(values);
+    }
+}

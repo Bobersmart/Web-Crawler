@@ -1,0 +1,350 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.settings;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.framework.MetaFileHandler;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.stream.Stream;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.github.gestalt.config.Gestalt;
+import org.github.gestalt.config.builder.GestaltBuilder;
+import org.github.gestalt.config.source.ClassPathConfigSourceBuilder;
+import org.github.gestalt.config.source.EnvironmentConfigSourceBuilder;
+import org.github.gestalt.config.source.FileConfigSourceBuilder;
+import org.github.gestalt.config.source.SystemPropertiesConfigSourceBuilder;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.error.YAMLException;
+
+/** Provides utility methods to read and write settings files */
+@SuppressWarnings("removal")
+public class FsSettingsLoader extends MetaFileHandler {
+
+    private static final Logger logger = LogManager.getLogger();
+
+    public static final String SETTINGS_JSON = "_settings.json";
+    public static final String SETTINGS_YAML = "_settings.yaml";
+    public static final String SETTINGS_DIR = "_settings";
+    public static final String DEFAULT_SETTINGS =
+            "/fr/pilato/elasticsearch/crawler/fs/settings/fscrawler-default.properties";
+    public static final String EXAMPLE_SETTINGS = "/fr/pilato/elasticsearch/crawler/fs/settings/fscrawler-default.yaml";
+
+    public FsSettingsLoader(Path root) {
+        super(root);
+    }
+
+    /**
+     * We read settings in ~/.fscrawler/{job_name}/_settings.[json|yml]
+     *
+     * @param jobName is the job_name
+     * @return Settings settings
+     * @throws IOException in case of error while reading
+     */
+    public FsSettings read(String jobName) throws IOException {
+        Path configYaml = root.resolve(jobName).resolve(SETTINGS_YAML);
+        logger.trace("Trying to read settings from [{}] file", configYaml);
+        if (Files.exists(configYaml)) {
+            return load(configYaml);
+        }
+        Path configJson = root.resolve(jobName).resolve(SETTINGS_JSON);
+        logger.trace("Trying to read settings from [{}] file", configJson);
+        if (Files.exists(configJson)) {
+            return load(configJson);
+        }
+        Path configDir = root.resolve(jobName).resolve(SETTINGS_DIR);
+        logger.trace("Trying to read settings from [{}] directory", configDir);
+        if (Files.exists(configDir)) {
+            return load(readDir(configDir).toArray(new Path[0]));
+        }
+        logger.debug(
+                "Can not read settings from [{}] with either /_settings.yaml, /_settings.json, /_settings/*."
+                        + " Falling back to default settings.",
+                root.resolve(jobName).toAbsolutePath());
+        return load();
+    }
+
+    /**
+     * We write settings to ~/.fscrawler/{job_name}/_settings.yaml
+     *
+     * @param name the job_name
+     * @param settings Settings to write (settings.getName() contains the job name)
+     * @throws IOException in case of error while reading
+     */
+    public void write(String name, FsSettings settings) throws IOException {
+        writeFile(name, SETTINGS_YAML, FsSettingsParser.toYaml(settings));
+    }
+
+    /**
+     * Read all files in ~/.fscrawler/{job_name}/_settings directory
+     *
+     * @param settingsDir is _settings directory
+     * @return The list of setting files
+     */
+    private List<Path> readDir(Path settingsDir) throws IOException {
+        try (Stream<Path> files = Files.list(settingsDir)) {
+            return files.toList();
+        }
+    }
+
+    /**
+     * Load settings from files. It could be both json or yaml files
+     *
+     * @param configFiles list of files to read
+     * @return The settings
+     * @throws FsCrawlerIllegalConfigurationException when we can not read settings
+     */
+    public static FsSettings load(Path... configFiles) throws FsCrawlerIllegalConfigurationException {
+        // Pre-validate YAML files for syntax errors to provide meaningful messages with line/column info
+        for (Path configFile : configFiles) {
+            String fileName = configFile.getFileName().toString();
+            if (fileName.endsWith(".yaml") || fileName.endsWith(".yml")) {
+                try (InputStream is = Files.newInputStream(configFile)) {
+                    // compose() validates syntax without constructing Java objects (safe, no tag processing)
+                    new Yaml().compose(new InputStreamReader(is));
+                } catch (YAMLException e) {
+                    throw new FsCrawlerIllegalConfigurationException(
+                            "Syntax error in configuration file [" + configFile.getFileName() + "]: " + e.getMessage(),
+                            e);
+                } catch (IOException e) {
+                    // Let Gestalt handle file I/O errors
+                }
+            }
+        }
+
+        try {
+            GestaltBuilder builder = new GestaltBuilder()
+                    .addSource(ClassPathConfigSourceBuilder.builder()
+                            .setResource(DEFAULT_SETTINGS)
+                            .build());
+
+            // This allows automatic configuration using System properties like -Dname=foobar or -Dfs.url=/tmp
+            builder.addSource(SystemPropertiesConfigSourceBuilder.builder().build());
+            // This allows automatic configuration using Env variables like FSCRAWLER_NAME=foobar or
+            // FSCRAWLER_FS_URL=/tmp
+            builder.addSource(EnvironmentConfigSourceBuilder.builder()
+                    .setPrefix("FSCRAWLER_")
+                    .setRemovePrefix(true)
+                    .build());
+
+            for (Path configFile : configFiles) {
+                builder.addSource(
+                        FileConfigSourceBuilder.builder().setPath(configFile).build());
+            }
+
+            Gestalt gestalt = builder.build();
+
+            // Loads and parses the configurations, this will throw exceptions if there are any errors.
+            gestalt.loadConfigs();
+
+            FsSettings settings = new FsSettings();
+
+            settings.setName(gestalt.getConfigOptional("name", String.class).orElse(null));
+            settings.setFs(loadFs(gestalt, configFiles));
+            settings.setPasswords(loadPasswords(gestalt, configFiles));
+            settings.setElasticsearch(gestalt.getConfigOptional("elasticsearch", Elasticsearch.class)
+                    .orElse(null));
+            settings.setTags(gestalt.getConfigOptional("tags", Tags.class).orElse(null));
+            settings.setServer(gestalt.getConfigOptional("server", Server.class).orElse(null));
+            settings.setRest(gestalt.getConfigOptional("rest", Rest.class).orElse(null));
+            settings.setKibana(gestalt.getConfigOptional("kibana", Kibana.class).orElse(null));
+
+            logger.debug(
+                    "Successfully loaded settings from classpath [fscrawler-default.properties] and files {}",
+                    (Object) configFiles);
+            logger.trace("Loaded settings [{}]", settings);
+
+            return settings;
+        } catch (Exception e) {
+            throw new FsCrawlerIllegalConfigurationException(
+                    "Can not load settings. " + "Please make sure that your setting file(s) are properly formatted.",
+                    e);
+        }
+    }
+
+    /**
+     * Load {@code fs} from Gestalt, then attach the opaque {@code fs.providers} map.
+     *
+     * <p>Provider-specific options are loaded from YAML/JSON job files via SnakeYAML (Gestalt cannot decode mixed
+     * nested maps/lists into {@code Map&lt;String, Object&gt;}). Scalar keys such as {@code fs.providers.ssh.hostname}
+     * are then overlaid from Gestalt so environment variables and system properties still work. File values win over
+     * env/sysprops.
+     */
+    private static Fs loadFs(Gestalt gestalt, Path... configFiles) {
+        Fs fs = gestalt.getConfigOptional("fs", Fs.class).orElse(null);
+        if (fs == null) {
+            return null;
+        }
+
+        Map<String, Object> providers = loadNestedMap(configFiles, "fs", "providers");
+        overlayProviderScalars(providers, gestalt, fs.getProvider());
+        fs.setProviders(providers.isEmpty() ? null : providers);
+
+        return fs;
+    }
+
+    /**
+     * Overlay Gestalt scalars onto each {@code fs.providers.<type>} map. YAML keys win. If {@code fs.provider} is a
+     * remote type absent from YAML, a map is created so env/sysprops still apply.
+     */
+    @SuppressWarnings("unchecked")
+    private static void overlayProviderScalars(Map<String, Object> providers, Gestalt gestalt, String activeProvider) {
+        List<String> stringKeys = List.of("hostname", "username", "password", "pem_path");
+        if (activeProvider != null && !activeProvider.isBlank() && !"local".equals(activeProvider)) {
+            providers.computeIfAbsent(activeProvider, key -> new LinkedHashMap<String, Object>());
+        }
+        for (String type : List.copyOf(providers.keySet())) {
+            Object section = providers.get(type);
+            if (!(section instanceof Map<?, ?>)) {
+                continue;
+            }
+            Map<String, Object> typed = new LinkedHashMap<>((Map<String, Object>) section);
+            overlayGestaltScalars(typed, gestalt, "fs.providers." + type, stringKeys, "port");
+            if (typed.isEmpty()) {
+                providers.remove(type);
+            } else {
+                providers.put(type, typed);
+            }
+        }
+    }
+
+    /**
+     * Load password settings without a closed typed graph for {@code providers}.
+     *
+     * <p>{@code passwords.provider} comes from Gestalt (YAML + env/sysprops). {@code passwords.providers} is an opaque
+     * map keyed by plugin type and is loaded from YAML/JSON job files via SnakeYAML: Gestalt cannot decode mixed nested
+     * maps/lists into {@code Map&lt;String, Object&gt;}. Each password plugin parses its own section.
+     */
+    private static Passwords loadPasswords(Gestalt gestalt, Path... configFiles) {
+        Optional<String> provider = gestalt.getConfigOptional("passwords.provider", String.class);
+        Map<String, Object> providers = loadPasswordProvidersFromFiles(configFiles);
+
+        if (provider.isEmpty() && providers.isEmpty()) {
+            return null;
+        }
+
+        Passwords passwords = new Passwords();
+        passwords.setProvider(provider.orElse("noop"));
+        passwords.setProviders(providers.isEmpty() ? null : providers);
+        return passwords;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loadPasswordProvidersFromFiles(Path... configFiles) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (configFiles == null || configFiles.length == 0) {
+            return merged;
+        }
+
+        Yaml yaml = new Yaml();
+        for (Path configFile : configFiles) {
+            Map<String, Object> root = loadYamlRoot(yaml, configFile);
+            Object passwordsNode = root.get("passwords");
+            if (passwordsNode instanceof Map<?, ?> passwordsMap) {
+                Object providersNode = passwordsMap.get("providers");
+                if (providersNode instanceof Map<?, ?> providersMap) {
+                    deepMerge(merged, (Map<String, Object>) providersMap);
+                }
+            }
+        }
+        return merged;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loadNestedMap(Path[] configFiles, String parentKey, String childKey) {
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (configFiles == null || configFiles.length == 0) {
+            return merged;
+        }
+
+        Yaml yaml = new Yaml();
+        for (Path configFile : configFiles) {
+            Map<String, Object> root = loadYamlRoot(yaml, configFile);
+            Object parentNode = root.get(parentKey);
+            if (parentNode instanceof Map<?, ?> parentMap) {
+                Object childNode = parentMap.get(childKey);
+                if (childNode instanceof Map<?, ?> childMap) {
+                    deepMerge(merged, (Map<String, Object>) childMap);
+                }
+            }
+        }
+        return merged;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> loadYamlRoot(Yaml yaml, Path configFile) {
+        if (configFile == null || Files.notExists(configFile)) {
+            return Map.of();
+        }
+        try (InputStream inputStream = Files.newInputStream(configFile)) {
+            Object loaded = yaml.load(inputStream);
+            if (loaded instanceof Map<?, ?> root) {
+                return (Map<String, Object>) root;
+            }
+        } catch (IOException e) {
+            logger.debug("Can not read [{}] while loading nested settings: {}", configFile, e.getMessage());
+        }
+        return Map.of();
+    }
+
+    /**
+     * Overlay scalar keys from Gestalt (env / system properties / files Gestalt can decode). Existing YAML map keys
+     * win: Gestalt is only used to fill keys that the opaque YAML map does not already contain, plus the case where the
+     * YAML block is absent entirely.
+     */
+    private static void overlayGestaltScalars(
+            Map<String, Object> target, Gestalt gestalt, String prefix, List<String> stringKeys, String intKey) {
+        for (String key : stringKeys) {
+            if (target.containsKey(key)) {
+                continue;
+            }
+            gestalt.getConfigOptional(prefix + "." + key, String.class).ifPresent(value -> target.put(key, value));
+        }
+        if (!target.containsKey(intKey)) {
+            gestalt.getConfigOptional(prefix + "." + intKey, Integer.class)
+                    .ifPresent(value -> target.put(intKey, value));
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void deepMerge(Map<String, Object> target, Map<String, Object> source) {
+        for (Map.Entry<String, Object> entry : source.entrySet()) {
+            String key = String.valueOf(entry.getKey());
+            Object value = entry.getValue();
+            Object existing = target.get(key);
+            if (existing instanceof Map<?, ?> existingMap && value instanceof Map<?, ?> valueMap) {
+                Map<String, Object> nested = new LinkedHashMap<>((Map<String, Object>) existingMap);
+                deepMerge(nested, (Map<String, Object>) valueMap);
+                target.put(key, nested);
+            } else {
+                target.put(key, value);
+            }
+        }
+    }
+}

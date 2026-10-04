@@ -1,0 +1,150 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.test.integration.elasticsearch;
+
+import fr.pilato.elasticsearch.crawler.fs.client.ESMatchQuery;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchRequest;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchResponse;
+import fr.pilato.elasticsearch.crawler.fs.client.ESTermQuery;
+import fr.pilato.elasticsearch.crawler.fs.client.ElasticsearchClientException;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.test.integration.AbstractFsCrawlerITCase;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+/** Test crawler with ingest pipelines */
+class FsCrawlerTestIngestPipelineIT extends AbstractFsCrawlerITCase {
+
+    /**
+     * Test case for #234: <a
+     * href="https://github.com/dadoonet/fscrawler/issues/234">https://github.com/dadoonet/fscrawler/issues/234</a> :
+     * Support ingest pipeline processing
+     */
+    @Test
+    void ingest_pipeline() throws Exception {
+        String crawlerName = getCrawlerName();
+
+        // Create an empty ingest pipeline
+        String pipeline = """
+                {
+                  "description" : "describe pipeline",
+                  "processors" : [
+                    {
+                      "rename": {
+                        "field": "content",
+                        "target_field": "my_content_field"
+                      }
+                    }
+                  ]
+                }""";
+        client.createPipeline(crawlerName, pipeline);
+
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getElasticsearch().setPipeline(crawlerName);
+
+        crawler = startCrawler(fsSettings);
+
+        // We expect to have one file
+        countTestHelper(
+                new ESSearchRequest()
+                        .withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_DOCS)
+                        .withESQuery(new ESMatchQuery("my_content_field", "perniciosoque")),
+                1L,
+                currentTestResourceDir);
+
+        // We expect to have one folder
+        ESSearchResponse response = countTestHelper(
+                new ESSearchRequest().withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_FOLDER),
+                1L,
+                currentTestResourceDir);
+        Assertions.assertThat(response.getTotalHits()).isEqualTo(1L);
+    }
+
+    /**
+     * Test case for #392: <a
+     * href="https://github.com/dadoonet/fscrawler/issues/392">https://github.com/dadoonet/fscrawler/issues/392</a> :
+     * Support ingest pipeline processing
+     */
+    @Test
+    void ingest_pipeline_392() throws Exception {
+        String crawlerName = getCrawlerName();
+
+        // Create an empty ingest pipeline
+        String pipeline = """
+                {
+                  "description": "Testing Grok on PDF upload",
+                  "processors": [
+                    {
+                      "gsub": {
+                        "field": "content",
+                        "pattern": "\\n",
+                        "replacement": "-"
+                      }
+                    },
+                    {
+                      "grok": {
+                        "field": "content",
+                        "patterns": [
+                          "%{DATA}%{IP:ip_addr} %{GREEDYDATA}"
+                        ]
+                      }
+                    }
+                  ]
+                }""";
+        client.createPipeline(crawlerName, pipeline);
+
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getElasticsearch().setPipeline(crawlerName);
+
+        crawler = startCrawler(fsSettings);
+
+        // We expect to have one file
+        ESSearchResponse response = countTestHelper(
+                new ESSearchRequest()
+                        .withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_DOCS)
+                        .withESQuery(new ESTermQuery("ip_addr", "127.0.0.1")),
+                1L,
+                currentTestResourceDir);
+        Assertions.assertThat(response.getTotalHits()).isEqualTo(1L);
+    }
+
+    /**
+     * Test case for #490: <a
+     * href="https://github.com/dadoonet/fscrawler/issues/490">https://github.com/dadoonet/fscrawler/issues/490</a> :
+     * Missing ES pipeline
+     */
+    @Test
+    void ingest_missing_pipeline_490() throws Exception {
+        String crawlerName = getCrawlerName();
+
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getElasticsearch().setPipeline(crawlerName);
+
+        try {
+            crawler = startCrawler(fsSettings);
+            Assertions.fail("We should have caught an ElasticsearchClientException");
+        } catch (ElasticsearchClientException e) {
+            Assertions.assertThat(e.getMessage())
+                    .contains("You defined pipeline:" + crawlerName + ", but it does not exist.");
+        }
+    }
+}

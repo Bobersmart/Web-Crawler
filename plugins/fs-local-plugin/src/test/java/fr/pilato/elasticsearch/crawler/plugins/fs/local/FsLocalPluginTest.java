@@ -1,0 +1,111 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.plugins.fs.local;
+
+import com.carrotsearch.randomizedtesting.jupiter.RandomizedTest;
+import fr.pilato.elasticsearch.crawler.fs.beans.FileAbstractModel;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettingsLoader;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerExtensionFsProvider;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.Locale;
+import java.util.Map;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+class FsLocalPluginTest extends AbstractFSCrawlerTestCase {
+
+    private FsCrawlerExtensionFsProvider localPlugin;
+
+    @BeforeEach
+    void setUp() {
+        FsSettings fsSettings = FsSettingsLoader.load();
+        FsLocalPlugin.FsCrawlerExtensionFsProviderLocal plugin = new FsLocalPlugin.FsCrawlerExtensionFsProviderLocal();
+        plugin.start(fsSettings);
+        localPlugin = plugin;
+    }
+
+    @Test
+    void getFiles() throws Exception {
+        Path tempDir = Files.createTempDirectory("testGetFiles");
+        // File1 is created first
+        Path tempFile1 = Files.createFile(tempDir.resolve("file1.txt"));
+
+        // Wait for 100ms to make sure file2 is created after
+        FsCrawlerUtil.waitFor(Duration.ofMillis(100));
+
+        // Then file2
+        Path tempFile2 = Files.createFile(tempDir.resolve("file2.txt"));
+
+        Collection<FileAbstractModel> files = localPlugin.getFiles(tempDir.toString());
+
+        Assertions.assertThat(files).hasSize(2);
+        Iterator<FileAbstractModel> iterator = files.iterator();
+        // Files should be sorted by modification time (most recent first)
+        Assertions.assertThat(iterator.next().getName())
+                .isEqualTo(tempFile2.toFile().getName());
+        Assertions.assertThat(iterator.next().getName())
+                .isEqualTo(tempFile1.toFile().getName());
+
+        // Clean up
+        Files.delete(tempFile1);
+        Files.delete(tempFile2);
+        Files.delete(tempDir);
+    }
+
+    @Test
+    void exists() throws Exception {
+        Path tempDir = Files.createTempDirectory("testExists");
+        Assertions.assertThat(localPlugin.exists(tempDir.toString())).isTrue();
+        Assertions.assertThat(localPlugin.exists(tempDir.resolve("nonexistent").toString()))
+                .isFalse();
+
+        // Clean up
+        Files.delete(tempDir);
+    }
+
+    @Test
+    void getType() {
+        Assertions.assertThat(localPlugin.getType()).isEqualTo("local");
+    }
+
+    @Test
+    void overlayWithoutUrlFails() {
+        FsSettings fsSettings = FsSettingsLoader.load();
+        FsLocalPlugin.FsCrawlerExtensionFsProviderLocal plugin = new FsLocalPlugin.FsCrawlerExtensionFsProviderLocal();
+        String extraField = RandomizedTest.randomAsciiLettersOfLengthBetween(randomizedRandomForTests, 6, 12)
+                .toLowerCase(Locale.ROOT);
+        String extraValue = RandomizedTest.randomAsciiLettersOfLengthBetween(randomizedRandomForTests, 6, 12)
+                .toLowerCase(Locale.ROOT);
+
+        Assertions.assertThatThrownBy(() -> plugin.start(fsSettings, Map.of(extraField, extraValue)))
+                .isInstanceOf(FsCrawlerIllegalConfigurationException.class)
+                .hasMessageContaining("local url is missing");
+    }
+}

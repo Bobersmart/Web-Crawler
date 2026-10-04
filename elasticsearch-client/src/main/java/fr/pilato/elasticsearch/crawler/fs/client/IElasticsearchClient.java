@@ -1,0 +1,303 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.client;
+
+import fr.pilato.elasticsearch.crawler.fs.beans.Doc;
+import java.io.Closeable;
+import java.util.List;
+
+/** Simple Elasticsearch client over HTTP or HTTPS. Only needed methods are exposed. */
+public interface IElasticsearchClient extends Closeable {
+    /** Start the client and its internal resources. This must be called before any operation can be performed. */
+    void start() throws ElasticsearchClientException;
+
+    /**
+     * Get the list of the active nodes. Could be use in an admin status API.
+     *
+     * @return the list of available nodes
+     */
+    List<String> getAvailableNodes();
+
+    /** Get version about the node it's connected to */
+    String getVersion() throws ElasticsearchClientException;
+
+    /** Get license about the cluster it's connected to */
+    String getLicense() throws ElasticsearchClientException;
+
+    /** Get the major version about the node it's connected to */
+    int getMajorVersion();
+
+    /**
+     * Create or update a component template
+     *
+     * @param name component template name
+     * @param json template definition
+     * @throws ElasticsearchClientException in case of error
+     */
+    void pushComponentTemplate(String name, String json) throws ElasticsearchClientException;
+
+    /**
+     * Create or update an index template
+     *
+     * @param name index template name
+     * @param json template definition
+     * @throws ElasticsearchClientException in case of error
+     */
+    void pushIndexTemplate(String name, String json) throws ElasticsearchClientException;
+
+    /**
+     * Check if an index exists
+     *
+     * @param index index name
+     * @return true if the index exists, false otherwise
+     */
+    boolean isExistingIndex(String index) throws ElasticsearchClientException;
+
+    /**
+     * Check if a pipeline exists
+     *
+     * @param pipeline pipeline name
+     * @return true if the pipeline exists, false otherwise
+     */
+    boolean isExistingPipeline(String pipeline) throws ElasticsearchClientException;
+
+    /**
+     * Check if a component template exists
+     *
+     * @param templateName component template name
+     * @return true if the component template exists, false otherwise
+     */
+    boolean isExistingComponentTemplate(String templateName) throws ElasticsearchClientException;
+
+    /**
+     * Check if an index template exists
+     *
+     * @param templateName index template name
+     * @return true if the index template exists, false otherwise
+     */
+    boolean isExistingIndexTemplate(String templateName) throws ElasticsearchClientException;
+
+    /**
+     * Refresh an index
+     *
+     * @param index index name
+     */
+    void refresh(String index) throws ElasticsearchClientException;
+
+    /**
+     * Wait for an index to become at least yellow (all primaries assigned)
+     *
+     * @param index index name
+     */
+    void waitForHealthyIndex(String index) throws ElasticsearchClientException;
+
+    /**
+     * Index a document (might use a BulkProcessor behind the scenes)
+     *
+     * @param index Index name
+     * @param id Document ID
+     * @param doc Document to index
+     * @param pipeline Pipeline (can be null)
+     */
+    void index(String index, String id, Doc doc, String pipeline);
+
+    /**
+     * Index a Raw Json in Elasticsearch
+     *
+     * @param index Index name
+     * @param id Document ID
+     * @param json Document to index
+     * @param pipeline Pipeline (can be null)
+     */
+    void indexRawJson(String index, String id, String json, String pipeline);
+
+    /**
+     * Index a single document using the Index Document API
+     *
+     * @param index Index name
+     * @param id Document ID
+     * @param json Document to index
+     * @param pipeline Pipeline (can be null)
+     */
+    void indexSingle(String index, String id, String json, String pipeline) throws ElasticsearchClientException;
+
+    /**
+     * Delete a document using a BulkProcessor behind the scenes
+     *
+     * @param index Index name
+     * @param id Document ID
+     */
+    void delete(String index, String id);
+
+    /**
+     * Delete a single document using the Delete Document API
+     *
+     * @param index Index name
+     * @param id Document ID
+     */
+    void deleteSingle(String index, String id) throws ElasticsearchClientException;
+
+    /**
+     * Create all needed component and index templates
+     *
+     * @throws java.io.IOException in case of I/O error while loading templates
+     * @throws ElasticsearchClientException in case of Elasticsearch error
+     */
+    void createIndexAndComponentTemplates() throws java.io.IOException, ElasticsearchClientException;
+
+    /**
+     * Run a search
+     *
+     * @param request Search Request
+     * @return A search response object
+     */
+    ESSearchResponse search(ESSearchRequest request) throws ElasticsearchClientException;
+
+    /**
+     * Remove an index
+     *
+     * @param index Index name
+     */
+    void deleteIndex(String index) throws ElasticsearchClientException;
+
+    /**
+     * Create or replace an ingest pipeline.
+     *
+     * @param pipeline pipeline name
+     * @param json pipeline definition as JSON
+     */
+    void createPipeline(String pipeline, String json) throws ElasticsearchClientException;
+
+    /**
+     * Remove an ingest pipeline. Missing pipelines are ignored (same idea as {@link #deleteIndex(String)}).
+     *
+     * @param pipeline pipeline name
+     */
+    void deletePipeline(String pipeline) throws ElasticsearchClientException;
+
+    /**
+     * Flush any pending Bulk operation. Note that flushing means immediate execution of the bulk request (with HTTP
+     * retries), but does not by itself fail the caller when the bulk failed — use
+     * {@link #flushAndEnsureBulkSucceeded()} (or {@link #ensureBulkSucceeded()} after flush) for that.
+     */
+    void flush();
+
+    /**
+     * Atomically flush pending bulks and fail if a fatal bulk failure was recorded during that window. Prefer this over
+     * separate {@link #flush()}+{@link #ensureBulkSucceeded()} calls (timer/REST can sneak a bulk in between).
+     *
+     * @throws ElasticsearchClientException when a fatal bulk failure was recorded
+     */
+    void flushAndEnsureBulkSucceeded() throws ElasticsearchClientException;
+
+    /**
+     * Like {@link #flushAndEnsureBulkSucceeded()}, but also fails if a bulk failure was recorded since
+     * {@code generation}.
+     *
+     * @param generation value from {@link #getBulkFailureGeneration()} captured before indexing
+     * @throws ElasticsearchClientException when a fatal bulk failure occurred since {@code generation}
+     */
+    void flushAndEnsureBulkSucceededSince(long generation) throws ElasticsearchClientException;
+
+    /**
+     * Throws if a previous bulk request failed after HTTP retries were exhausted. Does <b>not</b> clear the recorded
+     * failure (so concurrent callers — e.g. crawl + REST — all observe it). Clear explicitly with
+     * {@link #clearFatalBulkFailure()} at the start of a crawl run.
+     *
+     * @throws ElasticsearchClientException when a fatal bulk failure was recorded
+     */
+    void ensureBulkSucceeded() throws ElasticsearchClientException;
+
+    /**
+     * Monotonic counter bumped whenever a fatal bulk failure is recorded. Survives {@link #clearFatalBulkFailure()}.
+     */
+    long getBulkFailureGeneration();
+
+    /**
+     * Like {@link #ensureBulkSucceeded()}, but also fails if a bulk failure was recorded since {@code generation} (even
+     * if the sticky flag was cleared meanwhile). Used by REST around index+flush.
+     *
+     * @param generation value from {@link #getBulkFailureGeneration()} captured before indexing
+     * @throws ElasticsearchClientException when a fatal bulk failure occurred since {@code generation}
+     */
+    void ensureBulkSucceededSince(long generation) throws ElasticsearchClientException;
+
+    /**
+     * Clears the sticky fatal bulk failure flag so a new crawl run can start clean. Does not reset the failure
+     * generation counter.
+     */
+    void clearFatalBulkFailure();
+
+    /**
+     * Perform a LowLevel Request
+     *
+     * @param method HTTP method
+     * @param endpoint Endpoint
+     * @param jsonEntity Json entity if any
+     * @return the response from the server
+     */
+    @SuppressWarnings("UnusedReturnValue")
+    String performLowLevelRequest(String method, String endpoint, String jsonEntity)
+            throws ElasticsearchClientException;
+
+    /**
+     * Get a document by its ID
+     *
+     * @param index Index name
+     * @param id Document id
+     * @return A Search Hit
+     */
+    ESSearchHit get(String index, String id) throws ElasticsearchClientException;
+
+    /**
+     * Check that a document exists
+     *
+     * @param index Index name
+     * @param id Document id
+     * @return true if it exists, false otherwise
+     */
+    boolean exists(String index, String id) throws ElasticsearchClientException;
+
+    /**
+     * Send a _bulk request to Elasticsearch
+     *
+     * @param index optional index name; when non-null, calls {@code POST {index}/_bulk} so action lines can omit
+     *     {@code _index}
+     * @param ndjson the bulk content to send
+     * @return the outcome
+     */
+    String bulk(String index, String ndjson) throws ElasticsearchClientException;
+
+    /**
+     * Generate an API key (for tests purposes only)
+     *
+     * @param keyName the name of the key
+     * @return the generated API key BASE64 encoded of key:value
+     */
+    String generateApiKey(String keyName) throws ElasticsearchClientException;
+
+    /**
+     * Check if the client supports semantic search
+     *
+     * @return true if semantic is supported
+     */
+    boolean isSemanticSupported();
+}

@@ -1,0 +1,676 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.test.integration;
+
+import com.carrotsearch.randomizedtesting.jupiter.RandomizedTest;
+import com.jayway.jsonpath.JsonPath;
+import fr.pilato.elasticsearch.crawler.fs.FsCrawlerImpl;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchHit;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchRequest;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchResponse;
+import fr.pilato.elasticsearch.crawler.fs.client.ElasticsearchClient;
+import fr.pilato.elasticsearch.crawler.fs.client.ElasticsearchClientException;
+import fr.pilato.elasticsearch.crawler.fs.client.ElasticsearchIndexNotFoundException;
+import fr.pilato.elasticsearch.crawler.fs.framework.ExponentialBackoffPollInterval;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.TimeValue;
+import fr.pilato.elasticsearch.crawler.fs.settings.Elasticsearch;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettingsLoader;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.FsCrawlerUtilForTests;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.Slow;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.TestContainerHelper;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerPluginsManager;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.ProcessingException;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.charset.Charset;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.time.Duration;
+import java.util.Enumeration;
+import java.util.List;
+import java.util.Random;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import javax.net.ssl.SSLHandshakeException;
+import org.apache.commons.io.IOUtils;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.assertj.core.api.Assertions;
+import org.assertj.core.api.Assumptions;
+import org.awaitility.Awaitility;
+import org.awaitility.core.ConditionTimeoutException;
+import org.jetbrains.annotations.NotNull;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+/**
+ * Integration tests expect to have an elasticsearch instance running on <a
+ * href="https://127.0.0.1:9200">https://127.0.0.1:9200</a>. Otherwise, a TestContainer instance will be started. <br>
+ * Note that all existing data in this cluster might be removed <br>
+ * If you want to run tests against a remote cluster, please launch tests using tests.cluster.url property:
+ *
+ * <pre><code>mvn verify -Dtests.cluster.url=https://127.0.0.1:9200</code></pre>
+ *
+ * All integration tests might be skipped using:
+ *
+ * <pre><code>mvn verify -DskipIntegTests</code></pre>
+ */
+@DisabledIfSystemProperty(
+        named = "skipIntegTests",
+        matches = "true",
+        disabledReason = "skipIntegTests is true. So we are skipping the integration tests.")
+@Slow
+@ExtendWith(FsCrawlerTestSuiteExtension.class)
+abstract class AbstractITCase extends AbstractFSCrawlerTestCase {
+    private static final Logger logger = LogManager.getLogger();
+    protected static final Path DEFAULT_RESOURCES = Paths.get(getUrl("samples", "_common"));
+    private static final String DEFAULT_TEST_CLUSTER_URL = "https://127.0.0.1:9200";
+    private static final String DEFAULT_USERNAME = "elastic";
+    protected static String testClusterUrl = getSystemProperty("tests.cluster.url", DEFAULT_TEST_CLUSTER_URL);
+    protected static String testApiKey = getSystemProperty("tests.cluster.apiKey", null);
+    protected static final boolean TEST_KEEP_DATA = getSystemProperty("tests.leaveTemporary", true);
+    protected static final boolean TEST_CHECK_CERTIFICATE = getSystemProperty("tests.cluster.check_ssl", true);
+    private static final TestContainerHelper testContainerHelper = new TestContainerHelper();
+
+    protected Path metadataDir = null;
+    protected static Path testDocumentsDir;
+    protected FsCrawlerImpl crawler = null;
+    protected Path currentTestResourceDir;
+    protected Path currentTestTagDir;
+
+    private static String testCaCertificate = null;
+
+    protected static Elasticsearch elasticsearchConfiguration;
+    protected static FsCrawlerPluginsManager pluginsManager;
+    protected static ElasticsearchClient client;
+
+    /**
+     * We suppose that each test has its own set of files. Even if we duplicate them, that will make the code more
+     * readable. The temp folder which is used as a root is automatically cleaned after the test, so we don't have to
+     * worry about it.
+     */
+    @BeforeEach
+    void copyTestResources() throws IOException {
+        // We copy files from the src dir to the temp dir
+        logger.info("Launching test [{}]", jobName);
+        currentTestResourceDir = testTmpDir;
+        String url = getUrl("samples", jobName);
+        Path from = Paths.get(url);
+
+        if (Files.exists(from)) {
+            logger.trace("Copying test resources from [{}]", from);
+        } else {
+            logger.trace("Copying test resources from [{}]", DEFAULT_RESOURCES);
+            from = DEFAULT_RESOURCES;
+        }
+
+        FsCrawlerUtilForTests.copyDirs(from, currentTestResourceDir);
+
+        logger.debug("Test resources ready in [{}]", currentTestResourceDir);
+    }
+
+    @BeforeEach
+    void copyTags() throws IOException {
+        // We copy files from the src dir to the temp dir
+        String url = getUrl("tags", jobName);
+        Path from = Paths.get(url);
+
+        currentTestTagDir = rootTmpDir.resolve(jobName + ".tags");
+        logger.info(
+                "Looking for tags: jobName=[{}], from=[{}], currentTestTagDir=[{}]", jobName, from, currentTestTagDir);
+        if (Files.exists(from)) {
+            logger.info("Tags source exists at [{}]", from);
+            Files.createDirectories(currentTestTagDir.getParent());
+            FsCrawlerUtilForTests.copyDirs(from, currentTestTagDir);
+            logger.info("Tags ready in [{}]", currentTestTagDir);
+        } else {
+            logger.info("No tags found at [{}]", from);
+        }
+    }
+
+    @AfterEach
+    void cleanTestResources() {
+        logger.info("🏁 Test [{}] is now stopped", jobName);
+    }
+
+    @BeforeEach
+    void createJobDir() throws IOException {
+        metadataDir = rootTmpDir.resolve(".fscrawler");
+        Files.createDirectories(metadataDir);
+        logger.debug("🚦 Test metadata dir ready in [{}]", metadataDir);
+    }
+
+    @AfterEach
+    void printMetadataDirContent() throws IOException {
+        if (metadataDir != null) {
+            logger.debug("ls -l {}", metadataDir);
+            Files.list(metadataDir).forEach(path -> logger.debug("{}", path));
+        }
+    }
+
+    @BeforeAll
+    protected static synchronized void copyResourcesToTestDir() throws IOException, URISyntaxException {
+        if (testDocumentsDir != null) {
+            logger.debug("Test documents already copied — skipping copyResourcesToTestDir");
+            return;
+        }
+        // rootTmpDir is now a per-method instance field; use an independent temp dir
+        // for test documents which are read-only and shared across the entire suite.
+        Path testResourceTarget = Files.createTempDirectory("fscrawler-test-docs-");
+        logger.debug("⛏️ Creating test resources dir in [{}]", testResourceTarget);
+
+        // We copy files from the src dir to the temp dir
+        copyTestDocumentsToTargetDir(testResourceTarget, "documents", "/fscrawler-test-documents-marker.txt");
+        testDocumentsDir = testResourceTarget.resolve("documents");
+
+        logger.debug("🚦 Test resources ready in [{}]:", testResourceTarget);
+    }
+
+    /**
+     * Copy test documents to the test dir, so we will be able to run tests against them
+     *
+     * @param target target directory.
+     * @param sourceDirName source subdir name where files will be copied or extracted to.
+     * @param marker one of the filename which is available in the classpath which contains the test documents or within
+     *     a jar
+     * @throws IOException In case of IO problem
+     */
+    private static void copyTestDocumentsToTargetDir(Path target, String sourceDirName, String marker)
+            throws IOException, URISyntaxException {
+        URL resource = AbstractFSCrawlerTestCase.class.getResource(marker);
+
+        switch (resource.getProtocol()) {
+            case "file": {
+                Path finalTarget = target.resolve(sourceDirName);
+                if (Files.notExists(finalTarget)) {
+                    logger.debug("⛏️ Creating test dir named [{}]", finalTarget);
+                    Files.createDirectories(finalTarget);
+                }
+                // We are running our tests from the IDE most likely and documents are directly available in the
+                // classpath
+                Path source = Paths.get(resource.toURI()).getParent().resolve(sourceDirName);
+                if (Files.notExists(source)) {
+                    logger.error("directory [{}] should be copied to [{}]", source, target);
+                    throw new RuntimeException(source + " doesn't seem to exist. Check your JUnit tests.");
+                }
+
+                logger.debug("📂 Copying test documents from [{}] to [{}]", source, finalTarget);
+                FsCrawlerUtilForTests.copyDirs(source, finalTarget);
+                break;
+            }
+            case "jar": {
+                logger.debug("⛏️ Creating test dir named [{}]", target);
+                Files.createDirectories(target);
+                // We are  running our tests from the CLI most likely and documents are provided within a JAR as a
+                // dependency
+                String fileInJar = resource.getPath();
+                int i = fileInJar.indexOf("!/");
+                String jarFileWithProtocol = fileInJar.substring(0, i);
+                URI jarFile = new URI(jarFileWithProtocol);
+                unzip(Path.of(jarFile), target, Charset.defaultCharset());
+                break;
+            }
+            default:
+                Assertions.fail("Unknown protocol for IT document sources: " + resource.getProtocol());
+                break;
+        }
+    }
+
+    private static void unzip(Path zip, Path outputFolder, Charset charset) throws IOException {
+        logger.debug("🗜️ Unzipping test documents from [{}] to [{}]", zip, outputFolder);
+
+        try (ZipFile zipFile = new ZipFile(zip.toFile(), ZipFile.OPEN_READ, charset)) {
+            Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                Path entryPath = outputFolder.resolve(entry.getName());
+                if (entryPath.normalize().startsWith(outputFolder.normalize())) {
+                    if (entry.isDirectory()) {
+                        Files.createDirectories(entryPath);
+                    } else {
+                        Files.createDirectories(entryPath.getParent());
+                        try (InputStream in = zipFile.getInputStream(entry)) {
+                            try (OutputStream out = new FileOutputStream(entryPath.toFile())) {
+                                IOUtils.copy(in, out);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @BeforeAll
+    static synchronized void startServices(Random rnd) throws IOException, ElasticsearchClientException {
+        if (client != null) {
+            logger.debug("Shared resources already initialized — skipping startServices");
+            return;
+        }
+        logger.debug("⛏️ Generate settings against [{}] with ssl check [{}]", testClusterUrl, TEST_CHECK_CERTIFICATE);
+
+        FsSettings fsSettings = FsSettingsLoader.load();
+        // We build the elasticsearch Client based on the parameters
+        fsSettings.getElasticsearch().setUrls(List.of(testClusterUrl));
+        fsSettings.getElasticsearch().setSslVerification(TEST_CHECK_CERTIFICATE);
+        fsSettings.getElasticsearch().setCaCertificate(testCaCertificate);
+        if (testApiKey != null) {
+            fsSettings.getElasticsearch().setApiKey(testApiKey);
+        } else {
+            fsSettings.getElasticsearch().setUsername(DEFAULT_USERNAME);
+            fsSettings.getElasticsearch().setPassword(TestContainerHelper.DEFAULT_PASSWORD);
+        }
+
+        try {
+            client = startClient(fsSettings);
+        } catch (ElasticsearchClientException e) {
+            if (e.getCause() instanceof ProcessingException
+                    && e.getCause().getCause() instanceof SSLHandshakeException
+                    && fsSettings.getElasticsearch().isSslVerification()) {
+                logger.fatal(
+                        "❌ SSL check is on but you are probably using a self-signed certificate on [{}]."
+                                + " You can bypass this SSL check using -Dtests.cluster.check_ssl=false",
+                        fsSettings.getElasticsearch().getUrls().get(0));
+                throw e;
+            }
+
+            if (!DEFAULT_TEST_CLUSTER_URL.equals(testClusterUrl)) {
+                logger.fatal(
+                        "❌ Can not connect to Elasticsearch on [{}] with ssl checks [{}]. You can "
+                                + "disable it using -Dtests.cluster.check_ssl=false",
+                        testClusterUrl,
+                        TEST_CHECK_CERTIFICATE);
+                throw e;
+            }
+            if (testContainerHelper.isStarted()) {
+                logger.fatal(
+                        "❌ Elasticsearch TestContainer was previously started but we can not connect to it "
+                                + "on [{}] with ssl checks [{}].",
+                        testClusterUrl,
+                        TEST_CHECK_CERTIFICATE);
+                logger.fatal("Full error:", e);
+                throw e;
+            }
+
+            logger.debug("Elasticsearch is not running on [{}]. We switch to TestContainer.", testClusterUrl);
+            testClusterUrl = testContainerHelper.startElasticsearch(TEST_KEEP_DATA);
+            // Write the Ca Certificate on disk if exists (with versions < 8, no self-signed certificate)
+            if (testContainerHelper.getCertAsBytes() != null) {
+                Path clusterCaCrtPath = Files.createTempFile("fscrawler-ca-", ".crt");
+                Files.write(clusterCaCrtPath, testContainerHelper.getCertAsBytes());
+                testCaCertificate = clusterCaCrtPath.toAbsolutePath().toString();
+            } else {
+                testCaCertificate = null;
+            }
+            fsSettings.getElasticsearch().setUrls(List.of(testClusterUrl));
+            fsSettings.getElasticsearch().setSslVerification(testCaCertificate != null);
+            fsSettings.getElasticsearch().setCaCertificate(testCaCertificate);
+            client = startClient(fsSettings);
+        }
+
+        elasticsearchConfiguration = fsSettings.getElasticsearch();
+
+        Assumptions.assumeThat(client)
+                .as("Integration tests are skipped because we have not been able to find an Elasticsearch cluster")
+                .isNotNull();
+
+        // If the Api Key is not provided, we want to generate it and use in all the tests
+        if (testApiKey == null) {
+            // Generate the Api-Key
+            testApiKey = client.generateApiKey("fscrawler-" + RandomizedTest.randomAsciiAlphanumOfLength(rnd, 10));
+
+            fsSettings.getElasticsearch().setApiKey(testApiKey);
+            fsSettings.getElasticsearch().setUsername(null);
+            fsSettings.getElasticsearch().setPassword(null);
+
+            // Close the previous client
+            client.close();
+
+            // Start a new client with the Api Key
+            client = startClient(fsSettings);
+        }
+
+        // Load all plugins
+        pluginsManager = new FsCrawlerPluginsManager();
+        pluginsManager.loadPlugins();
+        pluginsManager.startPlugins();
+
+        String version = client.getVersion();
+        logger.info("✅ Starting integration tests against an external cluster running elasticsearch [{}]", version);
+    }
+
+    /**
+     * Called exactly once per JVM by {@link FsCrawlerTestSuiteExtension#close()}, after all tests and their lifecycle
+     * methods have completed.
+     */
+    static void shutdownSuiteResources() throws IOException {
+        logger.debug("🏁 Closing shared suite resources");
+        if (client != null) {
+            client.close();
+            client = null;
+            logger.debug("🏁 Elasticsearch client stopped");
+        }
+        if (pluginsManager != null) {
+            pluginsManager.close();
+            pluginsManager = null;
+        }
+    }
+
+    private static ElasticsearchClient startClient(FsSettings fsSettings) throws ElasticsearchClientException {
+        logger.debug(
+                "Starting a client against [{}] with [{}] as a CA certificate and ssl check [{}]",
+                fsSettings.getElasticsearch().getUrls().get(0),
+                fsSettings.getElasticsearch().getCaCertificate(),
+                fsSettings.getElasticsearch().isSslVerification());
+        // Use the test-only client (no background bulk flush thread; see ForTestsOnlyElasticsearchClient).
+        ElasticsearchClient client = new ForTestsOnlyElasticsearchClient(fsSettings);
+        client.start();
+        return client;
+    }
+
+    protected static void refresh(String indexName) throws ElasticsearchClientException {
+        try {
+            client.refresh(indexName);
+        } catch (NotFoundException e) {
+            // The index might not have been created yet. It could happen with cloud services, like serverless.
+            // We can safely ignore it.
+            logger.trace("Index [{}] does not exist yet so we can't refresh it.", indexName);
+        }
+    }
+
+    /**
+     * Check that we have the expected number of docs or at least one if expected is null
+     *
+     * @param request Elasticsearch request to run.
+     * @param expected expected number of docs. Null if at least 1.
+     * @param path Path we are supposed to scan. If we have not accurate results, we display its content
+     * @return the search response if further tests are needed
+     * @throws Exception in case of error
+     */
+    public static ESSearchResponse countTestHelper(final ESSearchRequest request, final Long expected, final Path path)
+            throws Exception {
+        return countTestHelper(request, expected, path, MAX_WAIT_FOR_SEARCH);
+    }
+
+    /**
+     * Check that we have the expected number of docs or at least one if expected is null
+     *
+     * @param request Elasticsearch request to run.
+     * @param expected expected number of docs. Null if at least 1.
+     * @param path Path we are supposed to scan. If we have not accurate results, we display its content
+     * @param duration Time before we declare a failure
+     * @return the search response if further tests are needed
+     * @throws Exception in case of error
+     */
+    public static ESSearchResponse countTestHelper(
+            final ESSearchRequest request, final Long expected, final Path path, final Duration duration)
+            throws Exception {
+
+        final ESSearchResponse[] response = new ESSearchResponse[1];
+
+        // We wait before considering a failing test
+        logger.info(
+                "⏳ Waiting up to {} for {} documents in {}",
+                FsCrawlerUtil.durationToString(duration),
+                expected == null ? "some" : expected,
+                request.getIndex());
+        AtomicReference<Exception> errorWhileWaiting = new AtomicReference<>();
+        AtomicReference<Long> lastHitCount = new AtomicReference<>();
+
+        try {
+            Awaitility.await()
+                    .atMost(duration)
+                    .pollInterval(
+                            ExponentialBackoffPollInterval.exponential(Duration.ofMillis(500), Duration.ofSeconds(5)))
+                    .until(() -> {
+                        long totalHits;
+
+                        // Let's search for entries
+                        try {
+                            // Make sure we refresh indexed docs before counting
+                            refresh(request.getIndex());
+                            response[0] = client.search(request);
+                            errorWhileWaiting.set(null);
+                        } catch (RuntimeException e) {
+                            logger.warn("error caught", e);
+                            errorWhileWaiting.set(e);
+                            return false;
+                        } catch (ElasticsearchIndexNotFoundException e) {
+                            logger.debug("index not ready yet: [{}]", e.getMessage());
+                            logger.trace("index not ready yet", e);
+                            errorWhileWaiting.set(e);
+                            return false;
+                        } catch (ElasticsearchClientException e) {
+                            logger.debug("error caught: [{}] ", e.getMessage());
+                            logger.trace("error caught", e);
+                            errorWhileWaiting.set(e);
+                            return false;
+                        }
+                        totalHits = response[0].getTotalHits();
+                        lastHitCount.set(totalHits);
+
+                        logger.debug("got so far [{}] hits on expected [{}]", totalHits, expected);
+
+                        if (expected == null) {
+                            return totalHits >= 1;
+                        }
+                        return totalHits == expected;
+                    });
+        } catch (ConditionTimeoutException e) {
+            Long lastHits = lastHitCount.get();
+            logger.warn(
+                    "Timed out waiting for {} documents in {} after {}. Last observed hit count: {}{}",
+                    expected == null ? "some" : expected,
+                    request.getIndex(),
+                    FsCrawlerUtil.durationToString(duration),
+                    lastHits == null ? "unknown (search never succeeded)" : lastHits,
+                    errorWhileWaiting.get() != null
+                            ? "; last error: " + errorWhileWaiting.get().getMessage()
+                            : "");
+            // If we caught an exception during waiting, throw it instead of the timeout
+            if (errorWhileWaiting.get() != null) {
+                throw errorWhileWaiting.get();
+            }
+            throw e;
+        }
+
+        long hits = response[0].getTotalHits();
+        if (expected == null) {
+            Assertions.assertThat(hits)
+                    .as("checking if any document in %s", request.getIndex())
+                    .withFailMessage(() -> {
+                        logContentOfDir(path, Level.WARN);
+                        return "got 0 documents in " + request.getIndex() + " while we expected at least one";
+                    })
+                    .isGreaterThan(0);
+
+        } else {
+            Assertions.assertThat(hits)
+                    .as("checking documents in %s", request.getIndex())
+                    .withFailMessage(() -> {
+                        logContentOfDir(path, Level.WARN);
+                        return "got " + hits + " documents in " + request.getIndex() + " while we expected exactly "
+                                + expected;
+                    })
+                    .isEqualTo(expected);
+        }
+
+        return response[0];
+    }
+
+    protected static void logContentOfDir(Path path, Level level) {
+        if (path != null) {
+            try (Stream<Path> stream = Files.walk(path)) {
+                stream.forEach(file -> {
+                    try {
+                        if (Files.isDirectory(file)) {
+                            logger.log(
+                                    level,
+                                    " * in dir [{}] [{}]",
+                                    path.relativize(file),
+                                    Files.getLastModifiedTime(file));
+                        } else {
+                            logger.log(level, "   - [{}] [{}]", file.getFileName(), Files.getLastModifiedTime(file));
+                        }
+                    } catch (IOException ignored) {
+                        // It's just for logging purposes.
+                    }
+                });
+            } catch (IOException ex) {
+                logger.error("can not read content of [{}]:", path);
+            }
+        }
+    }
+
+    public static String getUrl(String... subdirs) {
+        URL resource = AbstractITCase.class.getResource("/fscrawler-integration-tests-marker.txt");
+        File dir = urlToFile(resource).getParentFile();
+
+        for (String subdir : subdirs) {
+            dir = new File(dir, subdir);
+        }
+
+        return dir.getAbsoluteFile().getAbsolutePath();
+    }
+
+    /**
+     * Split a String at the first occurrence of the delimiter. Does not include the delimiter in the result.
+     *
+     * @param toSplit the string to split
+     * @param delimiter to split the string up with
+     * @return a two element array with index 0 being before the delimiter, and index 1 being after the delimiter
+     *     (neither element includes the delimiter); or <code>null</code> if the delimiter wasn't found in the given
+     *     input String
+     */
+    public static String[] split(String toSplit, String delimiter) {
+        int offset = toSplit.indexOf(delimiter);
+        String beforeDelimiter = toSplit.substring(0, offset);
+        String afterDelimiter = toSplit.substring(offset + delimiter.length());
+        return new String[] {beforeDelimiter, afterDelimiter};
+    }
+
+    public static void deleteRecursively(Path root) throws IOException {
+        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+            @Override
+            public @NotNull FileVisitResult visitFile(Path file, @NotNull BasicFileAttributes attrs)
+                    throws IOException {
+                Files.delete(file);
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public @NotNull FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                Files.delete(dir);
+                return FileVisitResult.CONTINUE;
+            }
+        });
+    }
+
+    protected static Elasticsearch clone(Elasticsearch source) {
+        Elasticsearch elasticsearch = FsSettingsLoader.load().getElasticsearch();
+        elasticsearch.setUrls(List.of(source.getUrls().get(0)));
+        elasticsearch.setSslVerification(source.isSslVerification());
+        elasticsearch.setCaCertificate(source.getCaCertificate());
+        elasticsearch.setApiKey(source.getApiKey());
+        elasticsearch.setUsername(source.getUsername());
+        elasticsearch.setPassword(source.getPassword());
+        return elasticsearch;
+    }
+
+    protected FsSettings createTestSettings() {
+        return createTestSettings(getCrawlerName());
+    }
+
+    protected FsSettings createTestSettings(String name) {
+        FsSettings fsSettings = FsSettingsLoader.load();
+        fsSettings.setName(name);
+        fsSettings.getFs().setUpdateRate(TimeValue.timeValueSeconds(5));
+        fsSettings.getFs().setUrl(currentTestResourceDir.toString());
+
+        // Clone the elasticsearchConfiguration to avoid modifying the default one
+        // We start with a clean configuration
+        Elasticsearch elasticsearch = clone(elasticsearchConfiguration);
+
+        fsSettings.setElasticsearch(elasticsearch);
+        fsSettings.getElasticsearch().setIndex(name + FsCrawlerUtil.INDEX_SUFFIX_DOCS);
+        fsSettings.getElasticsearch().setIndexFolder(name + FsCrawlerUtil.INDEX_SUFFIX_FOLDER);
+        fsSettings.getElasticsearch().setFlushInterval(TimeValue.timeValueSeconds(1));
+        // We explicitly set semantic search to false because IT takes too long time
+        fsSettings.getElasticsearch().setSemanticSearch(false);
+        // Disable Kibana dashboard provisioning by default; enable it only in dedicated Kibana ITs
+        // when -Dtests.kibana.url=... is provided (Cloud / Serverless CI).
+        if (fsSettings.getKibana() != null) {
+            fsSettings.getKibana().setPushDashboard(false);
+        }
+        return fsSettings;
+    }
+
+    /**
+     * Extract a specific hit knowing its filename
+     *
+     * @param response response object to extract from
+     * @param filename filename
+     * @return the found hit or an AssertionError if not found
+     */
+    protected static ESSearchHit findHitByFilename(final ESSearchResponse response, final String filename) {
+        return response.getHits().stream()
+                .filter(hit -> filename.equals(JsonPath.read(hit.getSource(), "$.file.filename")))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("No hit found with filename: " + filename));
+    }
+
+    protected static void cleanIndexAndTemplates(FsSettings currentSettings, String crawlerName)
+            throws ElasticsearchClientException {
+        logger.debug("🧹 Removing existing index [{}*]", crawlerName);
+        client.deleteIndex(crawlerName + FsCrawlerUtil.INDEX_SUFFIX_DOCS);
+        client.deleteIndex(crawlerName + FsCrawlerUtil.INDEX_SUFFIX_FOLDER);
+
+        // Remove existing templates by their exact names (mirroring what the crawler creates).
+        // A wildcard like fscrawler_<name>_* would, under parallel execution, also delete the
+        // templates of a sibling test whose crawler name shares this one's prefix.
+        logger.debug("🧹 Removing existing index and component templates for [{}]", crawlerName);
+        client.removeIndexAndComponentTemplates(
+                currentSettings != null ? currentSettings : AbstractFsCrawlerITCase.cleanupSettings(crawlerName));
+
+        // Ingest pipelines created by tests use getCrawlerName() as the pipeline id.
+        logger.debug("🧹 Removing existing ingest pipeline [{}]", crawlerName);
+        client.deletePipeline(crawlerName);
+    }
+}

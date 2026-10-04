@@ -1,0 +1,445 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.cli;
+
+import com.beust.jcommander.JCommander;
+import com.beust.jcommander.Parameter;
+import fr.pilato.elasticsearch.crawler.fs.FsCrawlerImpl;
+import fr.pilato.elasticsearch.crawler.fs.beans.FsCrawlerCheckpointFileHandler;
+import fr.pilato.elasticsearch.crawler.fs.beans.FsJobFileHandler;
+import fr.pilato.elasticsearch.crawler.fs.framework.Banner;
+import fr.pilato.elasticsearch.crawler.fs.framework.FSCrawlerLogger;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.MetaFileHandler;
+import fr.pilato.elasticsearch.crawler.fs.rest.RestServer;
+import fr.pilato.elasticsearch.crawler.fs.settings.Defaults;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsCrawlerValidator;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettingsLoader;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettingsParser;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerPluginsManager;
+import java.io.Console;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.List;
+import java.util.Scanner;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.core.Filter;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.ConsoleAppender;
+import org.apache.logging.log4j.core.config.Configuration;
+import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.core.filter.LevelMatchFilter;
+import org.apache.logging.log4j.core.filter.LevelRangeFilter;
+import org.awaitility.Awaitility;
+
+/** Main entry point to launch FsCrawler */
+public class FsCrawlerCli {
+
+    protected FsCrawlerCli() {
+        // Subclassed by the packaged entry point (FsCrawler in the distribution module); the constructor
+        // is protected to prevent external instantiation while still allowing that subclass to extend it.
+    }
+
+    private static final Duration CLOSE_POLLING_WAIT_TIME = Duration.ofMillis(100);
+
+    private static final Logger logger = LogManager.getLogger();
+    private static RestServer restServer;
+
+    @SuppressWarnings("CanBeFinal")
+    public static class FsCrawlerCommand {
+        @Parameter(description = "The job name to run. If not specified, fscrawler is used as the job name.")
+        List<String> jobName;
+
+        @Parameter(names = "--config_dir", description = "Config directory. Default to ~/.fscrawler")
+        String configDir = null;
+
+        /** @deprecated since 3.0, use {@code FS_JAVA_OPTS="-Delasticsearch.api-key"} instead */
+        @Parameter(
+                names = "--api_key",
+                description = "Elasticsearch api key. (Deprecated - use "
+                        + "FS_JAVA_OPTS=\"-Delasticsearch.api-key\" instead)")
+        @Deprecated(since = "3.0", forRemoval = true)
+        String apiKey = null;
+
+        /** @deprecated since 3.0, use {@code FS_JAVA_OPTS="-Delasticsearch.api-key"} instead */
+        @Parameter(
+                names = "--username",
+                description = "Elasticsearch username. (Deprecated - use "
+                        + "FS_JAVA_OPTS=\"-Delasticsearch.api-key\" instead)")
+        @Deprecated(since = "3.0", forRemoval = true)
+        String username = null;
+
+        @Parameter(names = "--loop", description = "Number of scan loop before exiting.")
+        Integer loop = -1;
+
+        @Parameter(
+                names = "--restart",
+                description = "Restart fscrawler job like if it never ran before. "
+                        + "This does not clean elasticsearch indices.")
+        boolean restart = false;
+
+        @Parameter(names = "--rest", description = "Start REST Layer")
+        boolean rest = false;
+
+        @Parameter(
+                names = "--upgrade",
+                description = "Upgrade elasticsearch indices from one old version to the last version.")
+        boolean upgrade = false;
+
+        @Parameter(names = "--setup", description = "Setup FSCrawler and associated services for a given job name.")
+        boolean setup = false;
+
+        @Parameter(names = "--list", description = "List FSCrawler jobs if any.")
+        boolean list = false;
+
+        /** @deprecated since 3.0, use {@code FS_JAVA_OPTS="-DLOG_LEVEL=debug"} instead */
+        @Deprecated(since = "3.0", forRemoval = true)
+        @Parameter(
+                names = "--debug",
+                description = "Debug mode (Deprecated - use FS_JAVA_OPTS=\"-DLOG_LEVEL=debug\" instead)")
+        boolean debug = false;
+
+        /** @deprecated since 3.0, use {@code FS_JAVA_OPTS="-DLOG_LEVEL=trace"} instead */
+        @Deprecated(since = "3.0", forRemoval = true)
+        @Parameter(
+                names = "--trace",
+                description = "Trace mode (Deprecated - use FS_JAVA_OPTS=\"-DLOG_LEVEL=trace\" instead)")
+        boolean trace = false;
+
+        @Parameter(names = "--silent", description = "Silent mode")
+        boolean silent = false;
+
+        @Parameter(names = "--help", description = "display current help", help = true)
+        boolean help;
+    }
+
+    public static void main(String[] args) throws Exception {
+        FsCrawlerCommand command = commandParser(args);
+
+        if (command != null) {
+            if (command.debug) {
+                // Deprecated command line option
+                logger.warn("--debug option has been deprecated. Use FS_JAVA_OPTS=\"-DLOG_LEVEL=debug\" instead.");
+            }
+            if (command.trace) {
+                // Deprecated command line option
+                logger.warn("--trace option has been deprecated. Use FS_JAVA_OPTS=\"-DLOG_LEVEL=trace\" instead.");
+            }
+
+            // We change the log level if needed
+            changeLoggerContext(command);
+
+            // Display the welcome banner
+            Banner.print();
+
+            // We can now launch the crawler
+            runner(command);
+        }
+    }
+
+    static FsCrawlerCommand commandParser(String[] args) {
+        FsCrawlerCommand commands = new FsCrawlerCommand();
+        JCommander jCommander = new JCommander(commands);
+        jCommander.parse(args);
+
+        if (commands.help) {
+            jCommander.usage();
+            return null;
+        }
+
+        return commands;
+    }
+
+    static void changeLoggerContext(FsCrawlerCommand command) {
+        // Change debug level if needed
+        if (command.debug || command.trace || command.silent) {
+            LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+            Configuration config = ctx.getConfiguration();
+            LoggerConfig loggerConfig = config.getLoggerConfig("fr.pilato.elasticsearch.crawler.fs");
+            applyConsoleFilters(config.getAppender("Console"), command);
+            loggerConfig.setLevel(command.debug ? Level.DEBUG : Level.TRACE);
+            ctx.updateLoggers();
+        }
+    }
+
+    private static void applyConsoleFilters(ConsoleAppender console, FsCrawlerCommand command) {
+        if (console == null) {
+            return;
+        }
+        if (command.silent) {
+            // We don't write anything on the console anymore
+            console.addFilter(LevelMatchFilter.newBuilder()
+                    .setLevel(Level.ALL)
+                    .setOnMatch(Filter.Result.DENY)
+                    .build());
+        } else {
+            console.addFilter(LevelRangeFilter.createFilter(
+                    command.debug ? Level.TRACE : Level.ALL, Level.ALL, Filter.Result.DENY, Filter.Result.ACCEPT));
+        }
+    }
+
+    /** Reinit the logger context to remove all filters */
+    static void reinitLoggerContext() {
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        Configuration config = ctx.getConfiguration();
+        ConsoleAppender console = config.getAppender("Console");
+        if (console != null) {
+            Filter filter = console.getFilter();
+            console.removeFilter(filter);
+        }
+
+        LoggerConfig loggerConfig = config.getLoggerConfig("fr.pilato.elasticsearch.crawler.fs");
+        if (loggerConfig != null) {
+            loggerConfig.setLevel(Level.INFO);
+        }
+    }
+
+    /**
+     * Create a job if needed
+     *
+     * @param jobName the job name
+     * @param configDir the config dir
+     * @throws IOException In case of IO problem
+     */
+    static void createJob(String jobName, Path configDir) throws IOException {
+        Path configJobDir = configDir.resolve(jobName);
+        Files.createDirectories(configJobDir);
+        Path configFile = configJobDir.resolve(FsSettingsLoader.SETTINGS_YAML);
+
+        if (Files.exists(configFile)) {
+            logger.debug("Job [{}] already exists, skipping creation", jobName);
+        } else {
+            // Write the example config files from the classpath FsSettingsLoader.EXAMPLE_SETTINGS
+            logger.debug(
+                    "Creating [{}] from the classloader [{}] file.", configFile, FsSettingsLoader.EXAMPLE_SETTINGS);
+            FsCrawlerUtil.copyResourceFile(FsSettingsLoader.EXAMPLE_SETTINGS, configFile);
+            FsSettings settings = FsSettingsLoader.load(configFile);
+            logger.info(
+                    "Created job [{}] with [fs.hash_algorithm={}] in the example settings. "
+                            + "Existing jobs without this setting keep MD5. "
+                            + "Changing the algorithm later changes every document _id and requires a full reindex.",
+                    jobName,
+                    settings.getFs().getHashAlgorithm());
+            if (logger.isDebugEnabled()) {
+                logger.debug("Created job [{}] with settings: [{}]", jobName, FsSettingsParser.toYaml(settings));
+            }
+        }
+    }
+
+    static void runner(FsCrawlerCommand command) throws IOException {
+        // create a scanner so we can read the command-line input
+        Console con = System.console();
+        Scanner scanner = null;
+        if (con != null) {
+            scanner = new Scanner(con.reader());
+        }
+
+        BootstrapChecks.check();
+
+        Path configDir;
+
+        if (command.configDir == null) {
+            configDir = MetaFileHandler.DEFAULT_ROOT;
+        } else {
+            configDir = Paths.get(command.configDir);
+        }
+
+        // Create the config dir if needed
+        FsCrawlerUtil.createDirIfMissing(configDir);
+
+        FsSettings fsSettings;
+
+        String jobName = resolveJobName(command);
+
+        if (command.list) {
+            // We are in list mode. We just display the list of existing jobs if any.
+            listJobs(configDir);
+            return;
+        }
+
+        if (command.setup) {
+            // We are in setup mode. We need to create the job if it does not exist yet.
+            setup(configDir, jobName);
+            return;
+        }
+
+        // If we ask to reinit, we need to clean the status and checkpoint for the job
+        if (command.restart) {
+            logger.debug("Cleaning existing status and checkpoint for job [{}]...", jobName);
+            new FsJobFileHandler(configDir).clean(jobName);
+            new FsCrawlerCheckpointFileHandler(configDir).clean(jobName);
+        }
+
+        logger.debug("Starting job [{}]...", jobName);
+        try {
+            fsSettings = new FsSettingsLoader(configDir).read(jobName);
+            // Let's make the job name not mandatory in the settings file
+            if (fsSettings.getName() == null) {
+                fsSettings.setName(jobName);
+            }
+        } catch (Exception e) {
+            logger.fatal("Cannot parse the configuration file: {}", e.getMessage());
+            throw e;
+        }
+
+        if (rejectDeprecatedCliAuth(command, fsSettings, scanner)) {
+            return;
+        }
+
+        if (logger.isTraceEnabled()) {
+            logger.trace("settings used for this crawler: [{}]", FsSettingsParser.toYaml(fsSettings));
+        }
+        if (FsCrawlerValidator.validateSettings(logger, fsSettings)) {
+            // We don't go further as we have critical errors
+            return;
+        }
+
+        // Load all plugins
+        FsCrawlerPluginsManager pluginsManager = new FsCrawlerPluginsManager();
+        pluginsManager.loadPlugins();
+        pluginsManager.startPlugins();
+        pluginsManager.startPasswordProviders(fsSettings);
+
+        runCrawlerSession(command, configDir, fsSettings, jobName, pluginsManager);
+    }
+
+    private static String resolveJobName(FsCrawlerCommand command) {
+        if (command.jobName == null || command.jobName.isEmpty()) {
+            logger.debug("No job name specified. Using default one [{}]...", Defaults.JOB_NAME_DEFAULT);
+            return Defaults.JOB_NAME_DEFAULT;
+        }
+        return command.jobName.get(0);
+    }
+
+    /** @return true if the command should abort because deprecated CLI auth was requested */
+    private static boolean rejectDeprecatedCliAuth(FsCrawlerCommand command, FsSettings fsSettings, Scanner scanner) {
+        if (command.username != null) {
+            logger.fatal(
+                    "We don't support reading elasticsearch username from the command line anymore. "
+                            + "Please use either FS_JAVA_OPTS=\"-Delasticsearch.username={}\" or set the env variable as "
+                            + "follows: FSCRAWLER_ELASTICSEARCH_USERNAME={} ",
+                    command.username,
+                    command.username);
+            return true;
+        }
+
+        if (command.apiKey != null) {
+            logger.fatal(
+                    "We don't support reading elasticsearch API Key from the command line anymore. "
+                            + "Please use either FS_JAVA_OPTS=\"-Delasticsearch.api-key={}\" or set the env variable as "
+                            + "follows: FSCRAWLER_ELASTICSEARCH_API-KEY={} ",
+                    command.apiKey,
+                    command.apiKey);
+            return true;
+        }
+
+        if (fsSettings.getElasticsearch().getUsername() != null
+                && fsSettings.getElasticsearch().getPassword() == null
+                && scanner != null) {
+            logger.fatal("We don't support reading elasticsearch password from the command line anymore. "
+                    + "Please use either FS_JAVA_OPTS=\"-Delasticsearch.password=YOUR_PASS\" or set the env variable as "
+                    + "follows: FSCRAWLER_ELASTICSEARCH_PASSWORD=YOUR_PASS.");
+            logger.warn("Using username and password is deprecated. Please use API Keys instead. See "
+                    + "https://fscrawler.readthedocs.io/en/latest/admin/fs/elasticsearch.html#api-key");
+            return true;
+        }
+        return false;
+    }
+
+    private static void runCrawlerSession(
+            FsCrawlerCommand command,
+            Path configDir,
+            FsSettings fsSettings,
+            String jobName,
+            FsCrawlerPluginsManager pluginsManager) {
+        try (FsCrawlerImpl fsCrawler = new FsCrawlerImpl(configDir, fsSettings, command.loop, command.rest)) {
+            // Let see if we want to upgrade an existing cluster to the latest version
+            if (command.upgrade) {
+                logger.info("Upgrading job [{}]. No rule implemented. Skipping.", jobName);
+            } else {
+                if (!startFsCrawlerThreadAndServices(fsCrawler)) {
+                    return;
+                }
+
+                // Start the REST Server if needed
+                if (command.rest) {
+                    restServer = new RestServer(
+                            fsSettings,
+                            fsCrawler.getManagementService(),
+                            fsCrawler.getDocumentService(),
+                            pluginsManager,
+                            fsCrawler.getFsParser());
+                    restServer.start();
+                }
+
+                // We add a shutdown hook to stop the crawler and all the related services
+                Runtime.getRuntime().addShutdownHook(new FSCrawlerShutdownHook(fsCrawler, pluginsManager, restServer));
+
+                // We just have to wait until the process is stopped
+                Awaitility.await()
+                        .forever()
+                        .pollInterval(CLOSE_POLLING_WAIT_TIME)
+                        .until(() -> fsCrawler.getFsParser().isClosed());
+            }
+        } catch (Exception e) {
+            logger.fatal("Fatal error received while running the crawler: [{}]", e.getMessage());
+            logger.debug("error caught", e);
+        }
+    }
+
+    private static void listJobs(Path configDir) {
+        FSCrawlerLogger.console("Here is the list of existing jobs:");
+        List<String> files = FsCrawlerJobsUtil.listExistingJobs(configDir);
+        if (!files.isEmpty()) {
+            for (int i = 0; i < files.size(); i++) {
+                FSCrawlerLogger.console("[{}] - {}", i + 1, files.get(i));
+            }
+        } else {
+            FSCrawlerLogger.console("No job exists in [{}].", configDir);
+            FSCrawlerLogger.console("To create your first job, run 'fscrawler --setup'");
+        }
+    }
+
+    private static void setup(Path configDir, String jobName) throws IOException {
+        logger.debug("Entering setup mode for [{}]...", jobName);
+        createJob(jobName, configDir);
+
+        FSCrawlerLogger.console(
+                "You can edit the settings in [{}]. Then, you can run again fscrawler " + "without the --setup option.",
+                configDir.resolve(jobName).resolve(FsSettingsLoader.SETTINGS_YAML));
+    }
+
+    private static boolean startFsCrawlerThreadAndServices(FsCrawlerImpl fsCrawler) {
+        try {
+            fsCrawler.start();
+            return true;
+        } catch (Exception t) {
+            logger.fatal("We can not start FSCrawler Thread and Services. Exiting.", t);
+            return false;
+        }
+    }
+}

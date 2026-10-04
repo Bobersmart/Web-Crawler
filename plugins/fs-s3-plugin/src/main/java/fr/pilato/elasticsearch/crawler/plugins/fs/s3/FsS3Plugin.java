@@ -1,0 +1,159 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.plugins.fs.s3;
+
+import fr.pilato.elasticsearch.crawler.fs.beans.Doc;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerExtensionFsProviderAbstract;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerPlugin;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerPluginException;
+import io.minio.GetObjectArgs;
+import io.minio.GetObjectResponse;
+import io.minio.MinioClient;
+import io.minio.errors.MinioException;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.Map;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.pf4j.Extension;
+
+public class FsS3Plugin extends FsCrawlerPlugin {
+    private static final Logger logger = LogManager.getLogger();
+
+    @Override
+    protected String getName() {
+        return "fs-s3";
+    }
+
+    @Extension
+    public static class FsCrawlerExtensionFsProviderS3 extends FsCrawlerExtensionFsProviderAbstract {
+
+        private MinioClient minioClient;
+        private String bucket;
+        private String url;
+        private String accesKey;
+        private String secretKey;
+        private String object;
+
+        @Override
+        public String getType() {
+            return "s3";
+        }
+
+        @Override
+        protected void parseSettings() {
+            bucket = overlayString("bucket");
+            object = overlayString("object");
+            url = overlayString("url");
+            accesKey = overlayString("access_key");
+            secretKey = overlayString("secret_key");
+        }
+
+        @Override
+        protected void validateSettings() {
+            if (!hasOverlay()) {
+                return;
+            }
+            if (FsCrawlerUtil.isNullOrEmpty(url)) {
+                throw new FsCrawlerIllegalConfigurationException("S3 URL is missing");
+            }
+            if (FsCrawlerUtil.isNullOrEmpty(bucket)) {
+                throw new FsCrawlerIllegalConfigurationException("S3 bucket is missing");
+            }
+            if (FsCrawlerUtil.isNullOrEmpty(object)) {
+                throw new FsCrawlerIllegalConfigurationException("S3 object is missing");
+            }
+        }
+
+        @Override
+        public void start(FsSettings fsSettings, Map<String, Object> overlay) {
+            super.start(fsSettings, overlay);
+            if (url == null) {
+                return;
+            }
+            minioClient = MinioClient.builder()
+                    .endpoint(url)
+                    .credentials(accesKey, secretKey)
+                    .build();
+        }
+
+        @Override
+        public void stop() throws FsCrawlerPluginException {
+            super.stop();
+            logger.trace("Closing FsCrawlerExtensionFsProviderS3");
+            if (minioClient != null) {
+                logger.debug("Closing minioClient");
+                try {
+                    minioClient.close();
+                } catch (Exception e) {
+                    throw new FsCrawlerPluginException("Error while closing S3 client", e);
+                }
+                minioClient = null;
+            }
+        }
+
+        @Override
+        public InputStream readFile() throws FsCrawlerPluginException {
+            logger.debug("Reading S3 file [{}] from bucket [{}/{}]", object, url, bucket);
+            GetObjectArgs getObjectArgs =
+                    GetObjectArgs.builder().bucket(bucket).object(object).build();
+            try {
+                return minioClient.getObject(getObjectArgs);
+            } catch (MinioException e) {
+                logger.debug("Failed to read file", e);
+                throw new FsCrawlerPluginException(
+                        "IOException caught while getting object " + object + " from bucket " + bucket + ":"
+                                + e.getMessage(),
+                        e);
+            }
+        }
+
+        private long getFilesize() throws FsCrawlerPluginException {
+            logger.debug("Reading S3 filesize for file [{}] from bucket [{}/{}]", object, url, bucket);
+            GetObjectArgs getObjectArgs =
+                    GetObjectArgs.builder().bucket(bucket).object(object).build();
+            try (GetObjectResponse response = minioClient.getObject(getObjectArgs)) {
+                logger.trace("S3 response headers [{}]", response.headers());
+                return Long.parseLong(response.headers().get("Content-Length"));
+            } catch (MinioException | IOException e) {
+                // Include the provider/native message (e.g. MinIO "The specified key does not exist")
+                // so REST error responses stay informative when createDocument runs before readFile.
+                throw new FsCrawlerPluginException(
+                        "Can not get file size for object " + object + " of bucket " + bucket + ": " + e.getMessage(),
+                        e);
+            }
+        }
+
+        @Override
+        public Doc createDocument() throws FsCrawlerPluginException {
+            logger.debug("Creating document from {}", object);
+            Doc doc = new Doc();
+            doc.getFile().setFilename(object);
+            doc.getPath().setVirtual(object);
+            doc.getPath().setReal(object);
+            doc.getFile().setFilesize(getFilesize());
+            return doc;
+        }
+    }
+}

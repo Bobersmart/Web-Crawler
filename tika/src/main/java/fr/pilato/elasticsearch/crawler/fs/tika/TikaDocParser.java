@@ -1,0 +1,688 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.tika;
+
+import fr.pilato.elasticsearch.crawler.fs.beans.Doc;
+import fr.pilato.elasticsearch.crawler.fs.framework.Digests;
+import fr.pilato.elasticsearch.crawler.fs.framework.FSCrawlerLogger;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.SignTool;
+import fr.pilato.elasticsearch.crawler.fs.framework.tracing.FsCrawlerTracing;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.plugins.FsCrawlerExtensionPasswordProvider;
+import fr.pilato.elasticsearch.crawler.plugins.PasswordSession;
+import io.opentelemetry.api.trace.Span;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Scope;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.security.DigestInputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.Collection;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.tika.language.detect.LanguageResult;
+import org.apache.tika.metadata.HttpHeaders;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.metadata.Office;
+import org.apache.tika.metadata.Property;
+import org.apache.tika.metadata.TikaCoreProperties;
+
+/**
+ * Parse a binary document and generate a FSCrawler Doc. One instance must be created per job so that jobs with
+ * different settings never share Tika parser state. An instance may be used concurrently by several threads of the same
+ * job (e.g. parallel REST uploads).
+ */
+public class TikaDocParser {
+
+    private static final Logger logger = LogManager.getLogger();
+
+    private final FsSettings fsSettings;
+    /** Null when index_content is disabled: no text extraction will ever happen for this job. */
+    private final TikaInstance tikaInstance;
+
+    /**
+     * Creates a document parser for one job. Builds the underlying Tika parser eagerly, unless {@code fs.index_content}
+     * is false in which case no Tika parser is needed at all.
+     *
+     * @param fsSettings the job settings
+     */
+    public TikaDocParser(FsSettings fsSettings) {
+        this.fsSettings = fsSettings;
+        this.tikaInstance = fsSettings.getFs().isIndexContent() ? new TikaInstance(fsSettings.getFs()) : null;
+    }
+
+    /**
+     * Threshold in bytes below which we keep the file content in memory instead of using a temp file. This avoids disk
+     * I/O overhead for small files while still protecting against OOM for large files.
+     */
+    private static final long IN_MEMORY_THRESHOLD = 64L * 1024; // 64KB
+
+    @FunctionalInterface
+    public interface InputStreamSupplier {
+        InputStream open() throws IOException;
+    }
+
+    private record ParsedContentResult(String content, Metadata metadata) {}
+
+    private record ExtractionAttempt(TikaInstance.ExtractResult result, Metadata metadata) {}
+
+    /**
+     * Parses one document and fills the given {@link Doc} (content, metadata, checksum, attachment) according to this
+     * job's settings.
+     *
+     * @param inputStream the document content; consumed but not closed by this method
+     * @param doc the doc to fill
+     * @param filesize the file size in bytes, or a value &le; 0 when unknown
+     * @throws IOException on stream or temp-file errors
+     */
+    public void generate(InputStream inputStream, Doc doc, long filesize) throws IOException {
+        generate(inputStream, null, doc, filesize, null, null);
+    }
+
+    public void generate(
+            InputStreamSupplier reopen,
+            Doc doc,
+            long filesize,
+            String explicitPassword,
+            FsCrawlerExtensionPasswordProvider provider)
+            throws IOException {
+        generate(null, reopen, doc, filesize, explicitPassword, provider);
+    }
+
+    private void generate(
+            InputStream inputStream,
+            InputStreamSupplier reopen,
+            Doc doc,
+            long filesize,
+            String explicitPassword,
+            FsCrawlerExtensionPasswordProvider provider)
+            throws IOException {
+        Span tikaSpan = FsCrawlerTracing.startSpan("fscrawler.tika.extract");
+        tikaSpan.setAttribute("file.size", filesize);
+        try (Scope scope = tikaSpan.makeCurrent()) {
+            logger.trace("Generating document [{}]", doc.getPath().getReal());
+            // Extracting content with Tika
+            // See #38: https://github.com/dadoonet/fscrawler/issues/38
+            int indexedChars = 100000;
+            if (fsSettings.getFs().getIndexedChars() != null) {
+                if (fsSettings.getFs().getIndexedChars().percentage()) {
+                    indexedChars = (int) Math.round(
+                            filesize * fsSettings.getFs().getIndexedChars().asDouble());
+                    logger.trace(
+                            "using percentage [{}] to define indexed chars: [{}]",
+                            fsSettings.getFs().getIndexedChars(),
+                            indexedChars);
+                } else {
+                    indexedChars = (int) fsSettings.getFs().getIndexedChars().value();
+                    logger.trace(
+                            "indexed chars [{}]",
+                            indexedChars == -1 ? "has been disabled. All text will be extracted" : indexedChars);
+                }
+            }
+            Metadata metadata = new Metadata();
+            metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, doc.getFile().getFilename());
+
+            String parsedContent = null;
+
+            // If checksum is needed, we need to read the entire stream to compute it.
+            // Tika's internal mark/reset during content type detection would otherwise cause
+            // the DigestInputStream to only hash the bytes read during detection (typically 64KB),
+            // not the entire file.
+            // To avoid loading the entire file in memory (which could cause OOM for large files),
+            // we use a temporary file to store the content while computing the checksum.
+            // We also use a temp file when storeSource is enabled, so we can read the file twice
+            // (once for Tika, once for storing as attachment).
+            // For small files (below IN_MEMORY_THRESHOLD), we keep everything in memory to avoid disk I/O.
+            MessageDigest messageDigest = Digests.getOrNull(fsSettings.getFs().getChecksum());
+            boolean needsBuffering = messageDigest != null || fsSettings.getFs().isStoreSource();
+            // Use in-memory only when we KNOW the file is small (filesize > 0 and <= threshold)
+            // When filesize is unknown (-1 or 0), use temp file to be safe and avoid OOM
+            boolean useInMemory = needsBuffering && filesize > 0 && filesize <= IN_MEMORY_THRESHOLD;
+            boolean useTempFile = needsBuffering && (filesize <= 0 || filesize > IN_MEMORY_THRESHOLD);
+            Path tempFile = null;
+            byte[] contentBuffer = null;
+            InputStreamSupplier extractionSupplier = reopen;
+            try {
+                if (useInMemory) {
+                    logger.trace(
+                            "Using in-memory buffer for small file (size: {}, checksum: {}, storeSource: {})",
+                            filesize,
+                            messageDigest != null,
+                            fsSettings.getFs().isStoreSource());
+                    // Read entire stream into memory
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                    InputStream sourceStream = inputStream != null ? inputStream : reopen.open();
+                    if (messageDigest != null) {
+                        try (DigestInputStream dis = new DigestInputStream(sourceStream, messageDigest)) {
+                            dis.transferTo(bos);
+                        }
+                    } else {
+                        try (InputStream in = sourceStream) {
+                            in.transferTo(bos);
+                        }
+                    }
+                    contentBuffer = bos.toByteArray();
+                    byte[] inMemoryContent = contentBuffer;
+                    extractionSupplier = () -> new ByteArrayInputStream(inMemoryContent);
+                } else if (useTempFile) {
+                    logger.trace(
+                            "Using temp file for large file (size: {}, checksum: {}, storeSource: {})",
+                            filesize,
+                            messageDigest != null,
+                            fsSettings.getFs().isStoreSource());
+                    // Use configured temp directory - it should always be set by FsCrawlerImpl
+                    if (fsSettings.getFs().getTempDir() == null) {
+                        throw new FsCrawlerIllegalConfigurationException(
+                                "tempDir must be configured when checksum or storeSource is enabled. "
+                                        + "This is normally set automatically by FsCrawlerImpl.");
+                    }
+                    Path tempDir = Paths.get(fsSettings.getFs().getTempDir());
+                    Files.createDirectories(tempDir);
+                    tempFile = Files.createTempFile(tempDir, "fscrawler-", ".tmp");
+                    // Copy stream to temp file, optionally computing the digest
+                    InputStream sourceStream = inputStream != null ? inputStream : reopen.open();
+                    if (messageDigest != null) {
+                        try (DigestInputStream dis = new DigestInputStream(sourceStream, messageDigest);
+                                OutputStream fos = Files.newOutputStream(tempFile)) {
+                            dis.transferTo(fos);
+                        }
+                    } else {
+                        try (InputStream in = sourceStream;
+                                OutputStream fos = Files.newOutputStream(tempFile)) {
+                            in.transferTo(fos);
+                        }
+                    }
+                    Path bufferedTempFile = tempFile;
+                    extractionSupplier = () -> Files.newInputStream(bufferedTempFile);
+                }
+
+                if (fsSettings.getFs().isIndexContent()) {
+                    ParsedContentResult parsedContentResult = extractionSupplier != null
+                            ? extractParsedContent(
+                                    tikaInstance, indexedChars, extractionSupplier, doc, explicitPassword, provider)
+                            : extractParsedContent(tikaInstance, indexedChars, inputStream, doc);
+                    parsedContent = parsedContentResult.content();
+                    metadata = parsedContentResult.metadata();
+
+                    // Adding what we found to the document we want to index
+
+                    // File
+                    doc.getFile().setContentType(metadata.get(HttpHeaders.CONTENT_TYPE));
+
+                    // We only add `indexed_chars` if we have other value than default or -1
+                    if (fsSettings.getFs().getIndexedChars() != null
+                            && fsSettings.getFs().getIndexedChars().value() != -1) {
+                        doc.getFile().setIndexedChars(indexedChars);
+                    }
+
+                    if (fsSettings.getFs().isAddFilesize() && metadata.get(HttpHeaders.CONTENT_LENGTH) != null) {
+                        // We try to get CONTENT_LENGTH from Tika first
+                        doc.getFile().setFilesize(Long.parseLong(metadata.get(HttpHeaders.CONTENT_LENGTH)));
+                    }
+
+                    if (messageDigest != null) {
+                        doc.getFile().setChecksum(Digests.toHex(messageDigest.digest()));
+                    }
+                    // File
+
+                    // Standard Meta
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.CREATOR,
+                            doc.getMeta()::setAuthor,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.TITLE,
+                            doc.getMeta()::setTitle,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.MODIFIED,
+                            doc.getMeta()::setDate,
+                            FsCrawlerUtil::parseInstant);
+
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            Office.KEYWORDS,
+                            doc.getMeta()::setKeywords,
+                            TikaDocParser::commaDelimitedListToStringArray);
+                    // PDF keywords often land only in pdf:docinfo:keywords (not Office.KEYWORDS), even with
+                    // recent Tika — keep this fallback. See https://issues.apache.org/jira/browse/TIKA-3629
+                    if (doc.getMeta().getKeywords() == null) {
+                        setMeta(
+                                doc.getPath().getReal(),
+                                metadata,
+                                Property.internalText("pdf:docinfo:keywords"),
+                                doc.getMeta()::setKeywords,
+                                TikaDocParser::commaDelimitedListToStringArray);
+                    }
+
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.FORMAT,
+                            doc.getMeta()::setFormat,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.IDENTIFIER,
+                            doc.getMeta()::setIdentifier,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.CONTRIBUTOR,
+                            doc.getMeta()::setContributor,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.COVERAGE,
+                            doc.getMeta()::setCoverage,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.MODIFIER,
+                            doc.getMeta()::setModifier,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.CREATOR_TOOL,
+                            doc.getMeta()::setCreatorTool,
+                            Function.identity());
+                    String finalParsedContent = parsedContent;
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.LANGUAGE,
+                            doc.getMeta()::setLanguage,
+                            lang -> {
+                                if (lang != null) {
+                                    return lang;
+                                } else if (fsSettings.getFs().isLangDetect() && finalParsedContent != null) {
+                                    List<LanguageResult> languages =
+                                            TikaInstance.langDetector().detectAll(finalParsedContent);
+                                    if (!languages.isEmpty()) {
+                                        LanguageResult language = languages.get(0);
+                                        logger.trace("Main detected language: [{}]", language);
+                                        return language.getLanguage();
+                                    }
+                                }
+                                return null;
+                            });
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.PUBLISHER,
+                            doc.getMeta()::setPublisher,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.RELATION,
+                            doc.getMeta()::setRelation,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.RIGHTS,
+                            doc.getMeta()::setRights,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.SOURCE,
+                            doc.getMeta()::setSource,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.TYPE,
+                            doc.getMeta()::setType,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.DESCRIPTION,
+                            doc.getMeta()::setDescription,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.CREATED,
+                            doc.getMeta()::setCreated,
+                            FsCrawlerUtil::parseInstant);
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.PRINT_DATE,
+                            doc.getMeta()::setPrintDate,
+                            FsCrawlerUtil::parseInstant);
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.METADATA_DATE,
+                            doc.getMeta()::setMetadataDate,
+                            FsCrawlerUtil::parseInstant);
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.LATITUDE,
+                            doc.getMeta()::setLatitude,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.LONGITUDE,
+                            doc.getMeta()::setLongitude,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.ALTITUDE,
+                            doc.getMeta()::setAltitude,
+                            Function.identity());
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.RATING,
+                            doc.getMeta()::setRating,
+                            value -> value == null ? null : Integer.parseInt(value));
+                    setMeta(
+                            doc.getPath().getReal(),
+                            metadata,
+                            TikaCoreProperties.COMMENTS,
+                            doc.getMeta()::setComments,
+                            Function.identity());
+
+                    // Add support for more OOTB standard metadata
+
+                    if (fsSettings.getFs().isRawMetadata()) {
+                        Metadata finalMetadata = metadata;
+                        FSCrawlerLogger.metadata("Listing all available metadata:");
+                        FSCrawlerLogger.metadata("  Assertions.assertThat(raw)");
+                        FSCrawlerLogger.metadata("    .hasSize({})", finalMetadata.size());
+                        Arrays.stream(finalMetadata.names())
+                                .sorted(String.CASE_INSENSITIVE_ORDER)
+                                .forEach(metadataName -> {
+                                    String value = finalMetadata.get(metadataName);
+                                    // This is a logger trick which helps to generate our unit tests
+                                    // You need to change test/resources/log4j2.xml
+                                    // fr.pilato.elasticsearch.crawler.fs.tika
+                                    // level to trace
+                                    FSCrawlerLogger.metadata("    .containsEntry(\"{}\", \"{}\")", metadataName, value);
+
+                                    // We need to remove dots in field names if any. See
+                                    // https://github.com/dadoonet/fscrawler/issues/256
+                                    doc.getMeta().addRaw(metadataName.replace('.', ':'), value);
+                                });
+                        FSCrawlerLogger.metadata(";");
+                    }
+                    // Meta
+
+                    // Doc content
+                    doc.setContent(parsedContent);
+                }
+
+                // Doc as binary attachment
+                if (fsSettings.getFs().isStoreSource()) {
+                    logger.trace("Storing source as attachment");
+                    if (contentBuffer != null) {
+                        // Use in-memory buffer for small files
+                        doc.setAttachment(Base64.getEncoder().encodeToString(contentBuffer));
+                    } else {
+                        // Stream from temp file for large files to avoid loading raw bytes into memory
+                        // We use Base64.getEncoder().wrap() to encode while streaming
+                        ByteArrayOutputStream base64Out = new ByteArrayOutputStream();
+                        try (OutputStream encoder = Base64.getEncoder().wrap(base64Out);
+                                InputStream fileIn = Files.newInputStream(tempFile)) {
+                            fileIn.transferTo(encoder);
+                        }
+                        // Use explicit charset to avoid platform dependency
+                        doc.setAttachment(base64Out.toString(StandardCharsets.UTF_8));
+                    }
+                }
+                logger.trace("End document generation");
+                // End of our document
+            } finally {
+                // Clean up temp file if it was created
+                if (tempFile != null) {
+                    deleteTempFileQuietly(tempFile);
+                }
+            }
+        } catch (Exception e) {
+            tikaSpan.recordException(e);
+            tikaSpan.setStatus(
+                    StatusCode.ERROR,
+                    e.getMessage() != null ? e.getMessage() : e.getClass().getName());
+            throw e;
+        } finally {
+            if (doc.getFile().getContentType() != null) {
+                tikaSpan.setAttribute("tika.content_type", doc.getFile().getContentType());
+            }
+            if (doc.getFile().getIndexedChars() != null) {
+                tikaSpan.setAttribute("tika.indexed_chars", doc.getFile().getIndexedChars());
+            }
+            tikaSpan.end();
+        }
+    }
+
+    private ParsedContentResult extractParsedContent(
+            TikaInstance tikaInstance, int indexedChars, InputStream inputStream, Doc doc) throws IOException {
+        Metadata metadata = createMetadata(doc);
+        logger.trace("Beginning Tika extraction");
+        TikaInstance.ExtractResult result = tikaInstance.extractText(indexedChars, inputStream, metadata, null);
+        logger.trace("End of Tika extraction");
+        return finalizeAttempt(indexedChars, doc, new ExtractionAttempt(result, metadata));
+    }
+
+    private ParsedContentResult extractParsedContent(
+            TikaInstance tikaInstance,
+            int indexedChars,
+            InputStreamSupplier reopen,
+            Doc doc,
+            String explicitPassword,
+            FsCrawlerExtensionPasswordProvider provider)
+            throws IOException {
+        if (explicitPassword != null) {
+            return finalizeAttempt(
+                    indexedChars, doc, extractAttempt(tikaInstance, indexedChars, reopen, doc, explicitPassword));
+        }
+
+        ExtractionAttempt initialAttempt = extractAttempt(tikaInstance, indexedChars, reopen, doc, null);
+        if (initialAttempt.result().status() != TikaInstance.ExtractStatus.ENCRYPTED) {
+            return finalizeAttempt(indexedChars, doc, initialAttempt);
+        }
+
+        if (provider == null) {
+            return new ParsedContentResult(null, initialAttempt.metadata());
+        }
+
+        int candidateCount = 0;
+        try (PasswordSession session = provider.open(doc.getPath().getReal())) {
+            Optional<String> candidate;
+            while ((candidate = session.next()).isPresent()) {
+                candidateCount++;
+                ExtractionAttempt candidateAttempt =
+                        extractAttempt(tikaInstance, indexedChars, reopen, doc, candidate.get());
+                if (candidateAttempt.result().status() == TikaInstance.ExtractStatus.ENCRYPTED) {
+                    continue;
+                }
+                return finalizeAttempt(indexedChars, doc, candidateAttempt);
+            }
+        }
+
+        if (candidateCount > 0) {
+            logger.warn(
+                    "Exhausted [{}] password candidates for [{}] without extracting content.",
+                    candidateCount,
+                    doc.getPath().getReal());
+        }
+
+        return new ParsedContentResult(null, initialAttempt.metadata());
+    }
+
+    private ExtractionAttempt extractAttempt(
+            TikaInstance tikaInstance, int indexedChars, InputStreamSupplier reopen, Doc doc, String password)
+            throws IOException {
+        Metadata metadata = createMetadata(doc);
+        try (InputStream inputStream = reopen.open()) {
+            logger.trace("Beginning Tika extraction");
+            TikaInstance.ExtractResult result = tikaInstance.extractText(indexedChars, inputStream, metadata, password);
+            logger.trace("End of Tika extraction");
+            return new ExtractionAttempt(result, metadata);
+        }
+    }
+
+    private ParsedContentResult finalizeAttempt(int indexedChars, Doc doc, ExtractionAttempt attempt) {
+        return switch (attempt.result().status()) {
+            case OK -> new ParsedContentResult(attempt.result().content(), attempt.metadata());
+            case ENCRYPTED -> new ParsedContentResult(null, attempt.metadata());
+            case FAILED -> {
+                logExtractionFailure(doc, indexedChars, attempt.result().failure());
+                yield new ParsedContentResult(null, attempt.metadata());
+            }
+        };
+    }
+
+    private static Metadata createMetadata(Doc doc) {
+        Metadata metadata = new Metadata();
+        metadata.set(TikaCoreProperties.RESOURCE_NAME_KEY, doc.getFile().getFilename());
+        return metadata;
+    }
+
+    private void logDocumentError(Doc doc, String errorMessage) {
+        try {
+            FSCrawlerLogger.documentError(
+                    fsSettings.getFs().isFilenameAsId()
+                            ? doc.getFile().getFilename()
+                            : SignTool.sign(
+                                    fsSettings.getFs().getHashAlgorithm(),
+                                    doc.getPath().getReal()),
+                    FsCrawlerUtil.computeVirtualPathName(
+                            fsSettings.getFs().getUrl(), doc.getPath().getReal()),
+                    errorMessage);
+        } catch (NoSuchAlgorithmException ignored) {
+            // Error is already logged below; hash algorithm failure must not hide it
+        }
+    }
+
+    private static void deleteTempFileQuietly(Path tempFile) {
+        try {
+            Files.deleteIfExists(tempFile);
+            logger.trace("Deleted temp file [{}]", tempFile);
+        } catch (IOException e) {
+            logger.warn("Failed to delete temp file [{}]: {}", tempFile, e.getMessage());
+        }
+    }
+
+    private void logExtractionFailure(Doc doc, int indexedChars, Throwable failure) {
+        String failureMessage = buildFailureMessage(failure);
+        logDocumentError(doc, failureMessage);
+        logger.warn(
+                "Failed to extract [{}] characters of text for [{}]: {}",
+                indexedChars,
+                doc.getPath().getReal(),
+                failureMessage);
+        logger.debug(
+                "Failed to extract [" + indexedChars + "] characters of text for ["
+                        + doc.getPath().getReal() + "]",
+                failure);
+    }
+
+    private static String buildFailureMessage(Throwable failure) {
+        StringBuilder builder = new StringBuilder();
+        Throwable current = failure;
+        while (current != null) {
+            if (builder.length() > 0) {
+                builder.append(" -> ");
+            }
+            builder.append(current.getMessage());
+            current = current.getCause();
+        }
+        return builder.toString();
+    }
+
+    private static <T> void setMeta(
+            String filename,
+            Metadata metadata,
+            Property property,
+            Consumer<T> setter,
+            Function<String, T> transformer) {
+        String sMeta = metadata.get(property);
+        try {
+            T value = transformer.apply(sMeta);
+            // Transformers may return an empty collection when the property is absent/blank (java:S1168). Treat that
+            // as "field not present" so language detection and PDF keyword fallback still see null.
+            if (value == null
+                    || (value instanceof Collection<?> c && c.isEmpty() && (sMeta == null || sMeta.isBlank()))) {
+                return;
+            }
+            setter.accept(value);
+        } catch (Exception e) {
+            logger.warn(
+                    "Can not parse meta [{}] for [{}]. Skipping [{}] field...", sMeta, filename, property.getName());
+        }
+    }
+
+    private static List<String> commaDelimitedListToStringArray(String str) {
+        if (str == null) {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        int pos = 0;
+        int delPos;
+        while ((delPos = str.indexOf(",", pos)) != -1) {
+            result.add(str.substring(pos, delPos));
+            pos = delPos + 1;
+        }
+        if (!str.isEmpty() && pos <= str.length()) {
+            // Add rest of String, but not in case of empty input.
+            result.add(str.substring(pos));
+        }
+        return result;
+    }
+}

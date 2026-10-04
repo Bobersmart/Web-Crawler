@@ -1,0 +1,207 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.test.integration.elasticsearch;
+
+import com.jayway.jsonpath.DocumentContext;
+import com.jayway.jsonpath.PathNotFoundException;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchHit;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchRequest;
+import fr.pilato.elasticsearch.crawler.fs.client.ESSearchResponse;
+import fr.pilato.elasticsearch.crawler.fs.framework.ExponentialBackoffPollInterval;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.OsValidator;
+import fr.pilato.elasticsearch.crawler.fs.framework.TimeValue;
+import fr.pilato.elasticsearch.crawler.fs.settings.FsSettings;
+import fr.pilato.elasticsearch.crawler.fs.test.integration.AbstractFsCrawlerITCase;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.AclEntry;
+import java.nio.file.attribute.AclEntryFlag;
+import java.nio.file.attribute.AclEntryPermission;
+import java.nio.file.attribute.AclEntryType;
+import java.nio.file.attribute.AclFileAttributeView;
+import java.nio.file.attribute.UserPrincipal;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.concurrent.TimeUnit;
+import org.assertj.core.api.Assertions;
+import org.awaitility.Awaitility;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledIf;
+
+/** Test attributes crawler settings */
+class FsCrawlerTestAttributesIT extends AbstractFsCrawlerITCase {
+
+    /**
+     * check if the filesystem used for tests supports ACLs. If it doesn't, we should not have ACL metadata in the
+     * documents, and ACL change tests should be disabled to avoid false negatives.
+     *
+     * @return true if not supported
+     */
+    static boolean isAclFilesystemNotSupported() {
+        try {
+            Path tmp = Files.createTempFile("acl-check", ".tmp");
+            try {
+                return Files.getFileAttributeView(tmp, AclFileAttributeView.class) == null;
+            } finally {
+                Files.deleteIfExists(tmp);
+            }
+        } catch (IOException e) {
+            return true;
+        }
+    }
+
+    @Test
+    void attributes() throws Exception {
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getFs().setAttributesSupport(true);
+        crawler = startCrawler(fsSettings);
+        ESSearchResponse searchResponse = countTestHelper(
+                new ESSearchRequest().withIndex(getCrawlerName() + FsCrawlerUtil.INDEX_SUFFIX_DOCS), 1L, null);
+        for (ESSearchHit hit : searchResponse.getHits()) {
+            DocumentContext document = JsonUtil.parseJsonAsDocumentContext(hit.getSource());
+            Assertions.assertThat((String) document.read("$.attributes.owner")).isNotEmpty();
+            if (OsValidator.WINDOWS) {
+                // We should not have values for group and permissions on Windows OS
+                Assertions.assertThatThrownBy(() -> document.read("$.attributes.group"))
+                        .isInstanceOf(PathNotFoundException.class);
+                Assertions.assertThat((Integer) document.read("$.attributes.permissions"))
+                        .isZero();
+            } else {
+                // We test group and permissions only on non Windows OS
+                Assertions.assertThat((String) document.read("$.attributes.group"))
+                        .isNotEmpty();
+                Assertions.assertThat((Integer) document.read("$.attributes.permissions"))
+                        .isGreaterThanOrEqualTo(400);
+            }
+        }
+    }
+
+    @Test
+    void aclAttributes() throws Exception {
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getFs().setAttributesSupport(true);
+        fsSettings.getFs().setAclSupport(true);
+        crawler = startCrawler(fsSettings);
+
+        ESSearchResponse searchResponse = countTestHelper(new ESSearchRequest().withIndex(getCrawlerName()), 1L, null);
+        for (ESSearchHit hit : searchResponse.getHits()) {
+            DocumentContext document = JsonUtil.parseJsonAsDocumentContext(hit.getSource());
+
+            List<?> aclEntries;
+            try {
+                aclEntries = document.read("$.attributes.acl");
+            } catch (PathNotFoundException e) {
+                aclEntries = null;
+            }
+
+            if (OsValidator.WINDOWS) {
+                Assertions.assertThat(aclEntries)
+                        .as("ACL metadata should be collected on Windows")
+                        .isNotNull()
+                        .isNotEmpty();
+                Assertions.assertThat((String) document.read("$.attributes.acl[0].principal"))
+                        .isNotBlank();
+                Assertions.assertThat((String) document.read("$.attributes.acl[0].type"))
+                        .isNotBlank();
+            } else {
+                Assertions.assertThat(aclEntries)
+                        .as("ACL metadata should not be present when the platform does not expose ACLs")
+                        .isNullOrEmpty();
+            }
+        }
+    }
+
+    @Test
+    @DisabledIf(
+            value = "isAclFilesystemNotSupported",
+            disabledReason = "ACL change tests require an ACL-capable filesystem")
+    void aclChangeTriggersReindex() throws Exception {
+        Path file = currentTestResourceDir.resolve("roottxtfile.txt");
+
+        FsSettings fsSettings = createTestSettings();
+        fsSettings.getFs().setAttributesSupport(true);
+        fsSettings.getFs().setAclSupport(true);
+        fsSettings.getFs().setUpdateRate(TimeValue.timeValueSeconds(1));
+
+        crawler = startCrawler(fsSettings);
+
+        DocumentContext initialDocument = fetchSingleDocument(fsSettings);
+        int initialAclSize = readAclSize(initialDocument);
+
+        addCustomAclEntry(file);
+
+        // Wait on ACL size, not indexing_date: with updateRate=1s the crawler can reindex
+        // every run on Windows (scanDate = start-2s) before the ACL change is visible.
+        Awaitility.await()
+                .atMost(60, TimeUnit.SECONDS)
+                .alias("Document ACL size should increase when ACL metadata changes")
+                .pollInterval(ExponentialBackoffPollInterval.exponential(Duration.ofMillis(500), Duration.ofSeconds(5)))
+                .until(() -> {
+                    try {
+                        return readAclSize(fetchSingleDocument(fsSettings)) > initialAclSize;
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+    }
+
+    private DocumentContext fetchSingleDocument(FsSettings fsSettings) throws Exception {
+        refresh(fsSettings.getElasticsearch().getIndex());
+        ESSearchResponse response = client.search(new ESSearchRequest()
+                .withIndex(fsSettings.getElasticsearch().getIndex())
+                .withSize(1));
+        Assertions.assertThat(response.getHits()).isNotEmpty();
+        return JsonUtil.parseJsonAsDocumentContext(response.getHits().get(0).getSource());
+    }
+
+    private void addCustomAclEntry(Path file) throws IOException {
+        AclFileAttributeView view = Files.getFileAttributeView(file, AclFileAttributeView.class);
+        if (view == null) {
+            throw new IOException("ACL view not supported");
+        }
+        List<AclEntry> entries = new ArrayList<>(view.getAcl());
+        UserPrincipal owner = Files.getOwner(file);
+        EnumSet<AclEntryPermission> permissions = EnumSet.of(AclEntryPermission.READ_ACL, AclEntryPermission.WRITE_ACL);
+        EnumSet<AclEntryFlag> flags = EnumSet.of(AclEntryFlag.FILE_INHERIT, AclEntryFlag.DIRECTORY_INHERIT);
+        AclEntry newEntry = AclEntry.newBuilder()
+                .setPrincipal(owner)
+                .setType(AclEntryType.ALLOW)
+                .setPermissions(permissions)
+                .setFlags(flags)
+                .build();
+        entries.add(newEntry);
+        view.setAcl(entries);
+    }
+
+    private int readAclSize(DocumentContext document) {
+        try {
+            List<?> aclEntries = document.read("$.attributes.acl");
+            return aclEntries != null ? aclEntries.size() : 0;
+        } catch (PathNotFoundException e) {
+            return 0;
+        }
+    }
+}

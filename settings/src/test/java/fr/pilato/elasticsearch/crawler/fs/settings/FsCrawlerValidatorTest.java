@@ -1,0 +1,159 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.settings;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.test.framework.AbstractFSCrawlerTestCase;
+import java.util.List;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.assertj.core.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+@SuppressWarnings("removal")
+class FsCrawlerValidatorTest extends AbstractFSCrawlerTestCase {
+    private static final Logger logger = LogManager.getLogger();
+
+    @Test
+    void passwordSidecarExcludesMerged() {
+        FsSettings settings = FsSettingsLoader.load();
+        settings.getFs().setExcludes(List.of("*/~*"));
+
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+        Assertions.assertThat(settings.getFs().getExcludes()).contains("*.password", "*/.password", "*/.ds_store");
+        Assertions.assertThat(FsCrawlerUtil.isExcluded(
+                        "foo.txt.password", settings.getFs().getExcludes()))
+                .isTrue();
+        Assertions.assertThat(FsCrawlerUtil.isExcluded(
+                        "foo/.password", settings.getFs().getExcludes()))
+                .isTrue();
+        Assertions.assertThat(FsCrawlerUtil.isExcluded(
+                        "subdir/.DS_Store", settings.getFs().getExcludes()))
+                .isTrue();
+        Assertions.assertThat(
+                        FsCrawlerUtil.isExcluded("foo.txt", settings.getFs().getExcludes()))
+                .isFalse();
+    }
+
+    @Test
+    void settingsValidation() {
+        // Checking default values
+        FsSettings settings = FsSettingsLoader.load();
+        settings.setName(jobName);
+        settings.getElasticsearch().setIndex(jobName + FsCrawlerUtil.INDEX_SUFFIX_DOCS);
+        settings.getElasticsearch().setIndexFolder(jobName + FsCrawlerUtil.INDEX_SUFFIX_FOLDER);
+
+        Assertions.assertThat(settings.getFs().getUrl()).isEqualTo(Defaults.DEFAULT_DIR);
+        Assertions.assertThat(settings.getElasticsearch().getUrls()).contains(Defaults.ELASTICSEARCH_URL_DEFAULT);
+        Assertions.assertThat(settings.getElasticsearch().getIndex())
+                .isEqualTo(jobName + FsCrawlerUtil.INDEX_SUFFIX_DOCS);
+        Assertions.assertThat(settings.getElasticsearch().getIndexFolder())
+                .isEqualTo(jobName + FsCrawlerUtil.INDEX_SUFFIX_FOLDER);
+        Assertions.assertThat(settings.getServer().getProtocol()).isEqualTo("local");
+        Assertions.assertThat(settings.getRest().getUrl()).isEqualTo("http://127.0.0.1:8080");
+
+        // Checking Checksum Algorithm
+        settings = FsSettingsLoader.load();
+        settings.getFs().setChecksum("FSCRAWLER");
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isTrue();
+
+        // Checking document _id hash algorithm
+        settings = FsSettingsLoader.load();
+        Assertions.assertThat(settings.getFs().getHashAlgorithm()).isEqualTo("MD5");
+        settings.getFs().setHashAlgorithm("FSCRAWLER");
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isTrue();
+        settings.getFs().setHashAlgorithm("SHA-256");
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+
+        // Checking That we don't try to do both xml and json
+        settings = FsSettingsLoader.load();
+        settings.getFs().setJsonSupport(true);
+        settings.getFs().setXmlSupport(true);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isTrue();
+
+        // Checking That we don't try to do index xml with not indexing the content
+        settings = FsSettingsLoader.load();
+        settings.getFs().setIndexContent(false);
+        settings.getFs().setXmlSupport(true);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isTrue();
+
+        // Checking That we don't try to do index json with not indexing the content
+        settings = FsSettingsLoader.load();
+        settings.getFs().setIndexContent(false);
+        settings.getFs().setJsonSupport(true);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isTrue();
+
+        // Checking with Rest but no Rest settings
+        settings = FsSettingsLoader.load();
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+        Assertions.assertThat(settings.getRest()).isNotNull();
+
+        // Checking bulk_operation: DELETE is internal-only
+        settings = FsSettingsLoader.load();
+        settings.getElasticsearch().setBulkOperation(BulkOperation.DELETE);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isTrue();
+        settings.getElasticsearch().setBulkOperation(BulkOperation.CREATE);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+        settings.getElasticsearch().setBulkOperation(BulkOperation.INDEX);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+
+        // kibana.push_dashboard defaults to true; missing url/credentials soft-disable provisioning
+        settings = FsSettingsLoader.load();
+        Kibana kibana = new Kibana();
+        kibana.setPushDashboard(true);
+        settings.setKibana(kibana);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+        Assertions.assertThat(settings.getKibana().isPushDashboard()).isFalse();
+
+        settings = FsSettingsLoader.load();
+        kibana = new Kibana();
+        kibana.setPushDashboard(true);
+        kibana.setUrl("http://127.0.0.1:5601");
+        settings.setKibana(kibana);
+        settings.getElasticsearch().setApiKey(null);
+        settings.getElasticsearch().setUsername(null);
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+        Assertions.assertThat(settings.getKibana().isPushDashboard()).isFalse();
+
+        settings = FsSettingsLoader.load();
+        kibana = new Kibana();
+        kibana.setPushDashboard(true);
+        kibana.setUrl("http://127.0.0.1:5601");
+        settings.setKibana(kibana);
+        settings.getElasticsearch().setApiKey("test-api-key");
+        Assertions.assertThat(FsCrawlerValidator.validateSettings(logger, settings))
+                .isFalse();
+        Assertions.assertThat(settings.getKibana().isPushDashboard()).isTrue();
+    }
+}

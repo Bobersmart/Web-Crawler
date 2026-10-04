@@ -1,0 +1,176 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.settings;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.Digests;
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerUtil;
+import fr.pilato.elasticsearch.crawler.fs.framework.OsValidator;
+import java.util.ArrayList;
+import java.util.List;
+import org.apache.logging.log4j.Logger;
+
+public class FsCrawlerValidator {
+    // Filename suffix for document password sidecars (*.password / */.password), not a credential.
+    @SuppressWarnings("java:S2068")
+    private static final String SIDECAR_SUFFIX = "password";
+
+    /** Patterns always merged into {@code fs.excludes} during validation when missing. */
+    private static final List<String> BUILTIN_EXCLUDES =
+            List.of("*." + SIDECAR_SUFFIX, "*/." + SIDECAR_SUFFIX, "*/.ds_store");
+
+    private FsCrawlerValidator() {
+        // Utility class, do not instantiate
+    }
+
+    /**
+     * Check if settings are valid. Note that settings can be updated by this method (fallback to defaults if not set)
+     *
+     * @param logger Needed to print warn/errors or info
+     * @param settings Settings we want to check
+     * @return true if we found fatal errors and should prevent from starting
+     */
+    public static boolean validateSettings(Logger logger, FsSettings settings) {
+        ensureBuiltinExcludes(settings);
+
+        if (settings.getElasticsearch().getUsername() != null
+                || settings.getElasticsearch().getPassword() != null) {
+            logger.warn("username/password is deprecated. Use apiKey instead.");
+        }
+
+        // Checking bulk_operation (DELETE is internal-only)
+        BulkOperation bulkOperation = settings.getElasticsearch().getBulkOperation();
+        if (bulkOperation == BulkOperation.DELETE) {
+            logger.error(
+                    "elasticsearch.bulk_operation [{}] is not supported for document writes. Please use {} or {}."
+                            + " Disabling crawler",
+                    bulkOperation,
+                    BulkOperation.INDEX,
+                    BulkOperation.CREATE);
+            return true;
+        }
+
+        if (validateDigestSettings(logger, settings)) {
+            return true;
+        }
+
+        if (validateFsContentFlags(logger, settings)) {
+            return true;
+        }
+
+        if (validateKibanaSettings(logger, settings)) {
+            return true;
+        }
+
+        // We just warn the user if he is running on Windows but want to get attributes
+        if (OsValidator.WINDOWS && settings.getFs().isAttributesSupport()) {
+            logger.info(
+                    "attributes_support is set to true but getting group is not available on [{}].", OsValidator.OS);
+        }
+
+        if (settings.getFs().isAclSupport() && !settings.getFs().isAttributesSupport()) {
+            logger.warn("acl_support is set to true but attributes_support is false. ACL collection is disabled.");
+        }
+
+        return false;
+    }
+
+    /**
+     * Ensure built-in exclude patterns are present.
+     *
+     * <p>Merges password sidecar patterns ({@code *.password}, directory {@code .password} files) and the macOS Finder
+     * metadata pattern for {@code .DS_Store} files (matched case-insensitively) into {@code fs.excludes} when missing.
+     * Existing excludes are preserved; the list is rewritten only when something is added (including when
+     * {@code fs.excludes} was {@code null}).
+     *
+     * @param settings settings mutated in place during validation
+     */
+    private static void ensureBuiltinExcludes(FsSettings settings) {
+        List<String> excludes = settings.getFs().getExcludes();
+        List<String> mergedExcludes = excludes == null ? new ArrayList<>() : new ArrayList<>(excludes);
+        boolean updated = excludes == null;
+
+        for (String builtinExclude : BUILTIN_EXCLUDES) {
+            if (!mergedExcludes.contains(builtinExclude)) {
+                mergedExcludes.add(builtinExclude);
+                updated = true;
+            }
+        }
+
+        if (updated) {
+            settings.getFs().setExcludes(mergedExcludes);
+        }
+    }
+
+    private static boolean validateDigestSettings(Logger logger, FsSettings settings) {
+        if (settings.getFs().getChecksum() != null
+                && !Digests.isSupported(settings.getFs().getChecksum())) {
+            logger.error(
+                    "Algorithm [{}] not found. Disabling crawler",
+                    settings.getFs().getChecksum());
+            return true;
+        }
+        if (settings.getFs().getHashAlgorithm() != null
+                && !Digests.isSupported(settings.getFs().getHashAlgorithm())) {
+            logger.error(
+                    "Hash algorithm [{}] not found. Disabling crawler",
+                    settings.getFs().getHashAlgorithm());
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean validateKibanaSettings(Logger logger, FsSettings settings) {
+        Kibana kibana = settings.getKibana();
+        if (kibana == null || !kibana.isPushDashboard()) {
+            return false;
+        }
+        if (FsCrawlerUtil.isNullOrEmpty(kibana.getUrl())) {
+            logger.warn("kibana.push_dashboard is enabled but kibana.url is not set. "
+                    + "Disabling dashboard provisioning.");
+            kibana.setPushDashboard(false);
+            return false;
+        }
+        Elasticsearch elasticsearch = settings.getElasticsearch();
+        if (FsCrawlerUtil.isNullOrEmpty(kibana.getApiKey())
+                && FsCrawlerUtil.isNullOrEmpty(elasticsearch.getApiKey())
+                && FsCrawlerUtil.isNullOrEmpty(elasticsearch.getUsername())) {
+            logger.warn("kibana.push_dashboard is enabled but no credentials were found. "
+                    + "Set elasticsearch.api_key or kibana.api_key. Disabling dashboard provisioning.");
+            kibana.setPushDashboard(false);
+            return false;
+        }
+        return false;
+    }
+
+    private static boolean validateFsContentFlags(Logger logger, FsSettings settings) {
+        if (settings.getFs().isJsonSupport() && settings.getFs().isXmlSupport()) {
+            logger.error("Can not support both xml and json parsing. Disabling crawler");
+            return true;
+        }
+        if ((settings.getFs().isJsonSupport() || settings.getFs().isXmlSupport())
+                && !settings.getFs().isIndexContent()) {
+            logger.error(
+                    "Json or Xml indexation is activated but you disabled indexing content which does not make sense. Disabling crawler");
+            return true;
+        }
+        return false;
+    }
+}

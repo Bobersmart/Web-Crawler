@@ -1,0 +1,373 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.tika;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerIllegalConfigurationException;
+import fr.pilato.elasticsearch.crawler.fs.settings.Fs;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.apache.tika.config.ServiceLoader;
+import org.apache.tika.config.loader.TikaLoader;
+import org.apache.tika.exception.EncryptedDocumentException;
+import org.apache.tika.exception.TikaConfigException;
+import org.apache.tika.exception.TikaException;
+import org.apache.tika.exception.WriteLimitReachedException;
+import org.apache.tika.exception.ZeroByteFileException;
+import org.apache.tika.io.TemporaryResources;
+import org.apache.tika.io.TikaInputStream;
+import org.apache.tika.language.detect.LanguageDetector;
+import org.apache.tika.metadata.Metadata;
+import org.apache.tika.metadata.TikaCoreProperties;
+import org.apache.tika.mime.MediaType;
+import org.apache.tika.mime.MediaTypeRegistry;
+import org.apache.tika.parser.AutoDetectParser;
+import org.apache.tika.parser.DefaultParser;
+import org.apache.tika.parser.ParseContext;
+import org.apache.tika.parser.Parser;
+import org.apache.tika.parser.ParserDecorator;
+import org.apache.tika.parser.PasswordProvider;
+import org.apache.tika.parser.gdal.GDALParser;
+import org.apache.tika.parser.image.BPGParser;
+import org.apache.tika.parser.image.HeifParser;
+import org.apache.tika.parser.image.ImageParser;
+import org.apache.tika.parser.image.JpegParser;
+import org.apache.tika.parser.image.TiffParser;
+import org.apache.tika.parser.ocr.TesseractOCRConfig;
+import org.apache.tika.parser.ocr.TesseractOCRParser;
+import org.apache.tika.parser.pdf.OcrConfig;
+import org.apache.tika.parser.pdf.PDFParser;
+import org.apache.tika.parser.pdf.PDFParserConfig;
+import org.apache.tika.parser.vlm.AbstractVLMParser;
+import org.apache.tika.sax.BodyContentHandler;
+import org.apache.tika.sax.WriteOutContentHandler;
+import org.xml.sax.SAXException;
+
+/**
+ * Holds the Tika {@link Parser} and {@link ParseContext} for one job. One instance is created per
+ * {@link TikaDocParser}, i.e. per job, so that jobs with different settings (OCR on/off, Tesseract language, PDF
+ * strategy...) never share mutable parser state within the same JVM. Instances are immutable after construction and
+ * safe for concurrent {@link #extractText} calls.
+ */
+class TikaInstance {
+
+    private static final Logger logger = LogManager.getLogger();
+
+    /** FSCrawler PDF OCR strategy value disabling OCR (see {@link #mapPdfOcrStrategy(String)}). */
+    private static final String PDF_STRATEGY_NO_OCR = "no_ocr";
+
+    /**
+     * Shared, settings-independent language detector. Kept static because loading the Optimaize models is expensive;
+     * access is synchronized as jobs may run concurrently.
+     */
+    private static LanguageDetector detector;
+
+    private Parser parser;
+    private ParseContext context;
+    private boolean ocrActivated;
+
+    enum ExtractStatus {
+        OK,
+        ENCRYPTED,
+        FAILED
+    }
+
+    record ExtractResult(ExtractStatus status, String content, Throwable failure) {
+        static ExtractResult ok(String content) {
+            return new ExtractResult(ExtractStatus.OK, content, null);
+        }
+
+        static ExtractResult encrypted(Throwable failure) {
+            return new ExtractResult(ExtractStatus.ENCRYPTED, null, failure);
+        }
+
+        static ExtractResult failed(Throwable failure) {
+            return new ExtractResult(ExtractStatus.FAILED, null, failure);
+        }
+    }
+
+    /**
+     * Builds the parser and parse context for the given settings. Note the construction order: the context is built
+     * before the parser, so the {@code Parser.class} entry registered in the context is null (no recursive
+     * embedded-document parser) — this mirrors the historical behaviour and must not be reordered without revisiting
+     * content/metadata expectations.
+     *
+     * @param fs fs settings for this job
+     */
+    TikaInstance(Fs fs) {
+        this.ocrActivated = fs.getOcr().isEnabled();
+        initContext(fs);
+        initParser(fs);
+    }
+
+    private void initParser(Fs fs) {
+        if (fs.getTikaConfigPath() != null) {
+            if (!(new File(fs.getTikaConfigPath())).exists()) {
+                throw new FsCrawlerIllegalConfigurationException(
+                        "Tika configuration file " + fs.getTikaConfigPath() + " not found!");
+            }
+            logger.info("Using custom tika configuration from [{}].", fs.getTikaConfigPath());
+            // Apache Tika 4 removed the XML-based Tika configuration file mechanism. Custom configurations
+            // are now JSON files loaded through TikaLoader (tika-serialization). A configuration error fails
+            // fast instead of being silently ignored: a user providing a config expects it to be applied.
+            try {
+                TikaLoader tikaLoader = TikaLoader.load(Paths.get(fs.getTikaConfigPath()));
+                parser = tikaLoader.loadAutoDetectParser();
+            } catch (TikaConfigException | IOException e) {
+                throw new FsCrawlerIllegalConfigurationException(
+                        "Can not load Tika configuration from [" + fs.getTikaConfigPath() + "]: " + e.getMessage(), e);
+            }
+            return;
+        }
+
+        PDFParser pdfParser = new PDFParser();
+        DefaultParser defaultParser;
+        Set<MediaType> exclude = new HashSet<>();
+        exclude.add(MediaType.image("png"));
+        exclude.add(MediaType.image("jpeg"));
+        exclude.add(MediaType.image("bmp"));
+        exclude.add(MediaType.image("gif"));
+
+        Parser gdalParser = ParserDecorator.withoutTypes(new GDALParser(), exclude);
+
+        // To solve https://issues.apache.org/jira/browse/TIKA-3364
+        // PDF content might be extracted multiple times.
+        pdfParser.getPDFParserConfig().setExtractBookmarksText(false);
+
+        if (ocrActivated) {
+            logger.debug("OCR is activated.");
+            // In Tika 4 the Tesseract paths live on TesseractOCRConfig (registered in the parse context), not on
+            // the parser. We reuse the very config built in initContext() so hasTesseract() checks our paths, and
+            // we build the parser from it. Any misconfiguration (e.g. a wrong path) throws a TikaConfigException,
+            // in which case we simply disable OCR — mirroring the historical "silently skip OCR" behaviour.
+            TesseractOCRConfig ocrConfig = context.get(TesseractOCRConfig.class);
+            try {
+                if (fs.getOcr().getPath() != null) {
+                    // Tika's tesseractPath wants the directory containing the tesseract executable, but
+                    // fs.ocr.path is documented as the path to the binary itself. Accept both: if the path
+                    // points to an existing file, use its parent directory instead.
+                    File ocrPath = new File(fs.getOcr().getPath());
+                    // getAbsoluteFile() so getParent() is never null for a bare relative filename.
+                    String tesseractPath = ocrPath.isFile()
+                            ? ocrPath.getAbsoluteFile().getParent()
+                            : fs.getOcr().getPath();
+                    logger.debug("Tesseract Path set to [{}].", tesseractPath);
+                    ocrConfig.setTesseractPath(tesseractPath);
+                }
+                if (fs.getOcr().getDataPath() != null) {
+                    logger.debug("Tesseract Data Path set to [{}].", fs.getOcr().getDataPath());
+                    ocrConfig.setTessdataPath(fs.getOcr().getDataPath());
+                }
+                TesseractOCRParser ocrParser = new TesseractOCRParser(ocrConfig);
+                if (ocrParser.hasTesseract()) {
+                    logger.debug(
+                            "OCR strategy for PDF documents is [{}] and tesseract was found.",
+                            fs.getOcr().getPdfStrategy());
+                    setPdfOcrStrategy(pdfParser, fs.getOcr().getPdfStrategy());
+                } else {
+                    logger.debug("But Tesseract is not installed so we won't run OCR.");
+                    ocrActivated = false;
+                    setPdfOcrStrategy(pdfParser, PDF_STRATEGY_NO_OCR);
+                }
+            } catch (TikaConfigException e) {
+                logger.debug("Tesseract is not correctly set up so we won't run OCR. Error is: {}", e.getMessage());
+                logger.debug("Fullstack trace error for Tesseract", e);
+                ocrActivated = false;
+                setPdfOcrStrategy(pdfParser, PDF_STRATEGY_NO_OCR);
+            }
+        }
+
+        if (ocrActivated) {
+            logger.info("OCR is enabled. This might slowdown the process.");
+            // We are excluding the pdf parser as we built one that we want to use instead.
+            // The VLM parsers (tika-vlm) are excluded from the default SPI chain: they are only functional
+            // when explicitly listed in a custom Tika configuration (which initializes them), and blind SPI
+            // instantiation would needlessly create their HTTP client.
+            defaultParser = new DefaultParser(
+                    MediaTypeRegistry.getDefaultRegistry(),
+                    new ServiceLoader(),
+                    List.of(PDFParser.class, GDALParser.class, AbstractVLMParser.class));
+        } else {
+            logger.info("OCR is disabled.");
+            TesseractOCRConfig config = context.get(TesseractOCRConfig.class);
+            if (config != null) {
+                config.setSkipOcr(true);
+            }
+            // We are excluding the pdf parser as we built one that we want to use instead
+            // and the OCR Parser as it's explicitly disabled. See above for the VLM parsers exclusion.
+            defaultParser = new DefaultParser(
+                    MediaTypeRegistry.getDefaultRegistry(),
+                    new ServiceLoader(),
+                    Arrays.asList(PDFParser.class, TesseractOCRParser.class, AbstractVLMParser.class));
+        }
+        parser = new AutoDetectParser(
+                defaultParser,
+                pdfParser,
+                gdalParser,
+                new BPGParser(),
+                new TiffParser(),
+                new HeifParser(),
+                new ImageParser(),
+                new JpegParser());
+    }
+
+    /**
+     * Applies the FSCrawler PDF OCR strategy on the given PDF parser. In Tika 4 the strategy moved from
+     * {@code PDFParser.setOcrStrategy(String)} to {@link PDFParserConfig#setOcr(OcrConfig)} with an
+     * {@link OcrConfig.Strategy} enum, so we translate our documented string values accordingly.
+     *
+     * @param pdfParser the PDF parser to configure
+     * @param strategy one of {@code no_ocr}, {@code auto}, {@code ocr_only} or {@code ocr_and_text}
+     */
+    private static void setPdfOcrStrategy(PDFParser pdfParser, String strategy) {
+        PDFParserConfig pdfConfig = pdfParser.getPDFParserConfig();
+        OcrConfig ocrConfig = pdfConfig.getOcr();
+        if (ocrConfig == null) {
+            ocrConfig = new OcrConfig();
+        }
+        ocrConfig.setStrategy(mapPdfOcrStrategy(strategy));
+        pdfConfig.setOcr(ocrConfig);
+    }
+
+    /**
+     * Maps an FSCrawler PDF OCR strategy string to the Tika 4 {@link OcrConfig.Strategy} enum. When the strategy is
+     * null, {@link OcrConfig.Strategy#AUTO} is used (the FSCrawler default). The FSCrawler value {@code ocr_and_text}
+     * maps to {@link OcrConfig.Strategy#OCR_AND_TEXT_EXTRACTION}. Unknown values fall back to
+     * {@link OcrConfig.Strategy#AUTO}.
+     *
+     * @param strategy the FSCrawler strategy string (may be null)
+     * @return the matching Tika strategy
+     */
+    private static OcrConfig.Strategy mapPdfOcrStrategy(String strategy) {
+        if (strategy == null) {
+            return OcrConfig.Strategy.AUTO;
+        }
+        return switch (strategy.toLowerCase(Locale.ROOT)) {
+            case PDF_STRATEGY_NO_OCR -> OcrConfig.Strategy.NO_OCR;
+            case "ocr_only" -> OcrConfig.Strategy.OCR_ONLY;
+            case "ocr_and_text", "ocr_and_text_extraction" -> OcrConfig.Strategy.OCR_AND_TEXT_EXTRACTION;
+            default -> OcrConfig.Strategy.AUTO;
+        };
+    }
+
+    private void initContext(Fs fs) {
+        context = new ParseContext();
+        // Historical behaviour: parser is still null at this point, so no embedded-document
+        // parser is registered in the context. Do not move this after initParser().
+        context.set(Parser.class, parser);
+        if (ocrActivated) {
+            logger.debug("OCR is activated so we need to configure Tesseract in case we have specific settings.");
+            TesseractOCRConfig config = new TesseractOCRConfig();
+            logger.debug("Tesseract Language set to [{}].", fs.getOcr().getLanguage());
+            config.setLanguage(fs.getOcr().getLanguage());
+            if (fs.getOcr().getPageSegMode() != null) {
+                logger.debug("Tesseract PageSegMode set to [{}].", fs.getOcr().getPageSegMode());
+                config.setPageSegMode("" + fs.getOcr().getPageSegMode());
+            }
+            if (fs.getOcr().getPreserveInterwordSpacing() != null) {
+                logger.debug(
+                        "Tesseract preserveInterwordSpacing set to [{}].",
+                        fs.getOcr().getPreserveInterwordSpacing());
+                config.setPreserveInterwordSpacing(fs.getOcr().getPreserveInterwordSpacing());
+            }
+            if (fs.getOcr().getOutputType() != null) {
+                logger.debug("Tesseract Output Type set to [{}].", fs.getOcr().getOutputType());
+                config.setOutputType(fs.getOcr().getOutputType());
+            }
+            context.set(TesseractOCRConfig.class, config);
+        }
+    }
+
+    ExtractResult extractText(int indexedChars, InputStream stream, Metadata metadata, String password)
+            throws IOException {
+        WriteOutContentHandler handler = new WriteOutContentHandler(indexedChars);
+        // Tika 4 requires a TikaInputStream for Parser.parse(). Use TemporaryResources so Tika can spool/cache
+        // without closing the caller's stream (required for FTP/SFTP wrappers that finalize the transfer on close).
+        try (TemporaryResources tmp = new TemporaryResources()) {
+            TikaInputStream tikaInputStream = TikaInputStream.get(stream, tmp, metadata);
+            parser.parse(tikaInputStream, new BodyContentHandler(handler), metadata, createParseContext(password));
+        } catch (WriteLimitReachedException e) {
+            String resourceName = metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY);
+            logger.debug("We reached the limit we set ({}) for {}: {}", indexedChars, resourceName, e.getMessage());
+            return ExtractResult.ok(handler.toString());
+        } catch (SAXException e) {
+            return classifyFailure(new TikaException("Unexpected SAX processing failure", e));
+        } catch (ZeroByteFileException e) {
+            String resourceName = metadata.get(TikaCoreProperties.RESOURCE_NAME_KEY);
+            logger.debug("Got an empty file for {}, so we are just skipping it.", resourceName);
+            return ExtractResult.ok(handler.toString());
+        } catch (Exception e) {
+            return classifyFailure(e);
+        }
+        return ExtractResult.ok(handler.toString());
+    }
+
+    private ParseContext createParseContext(String password) {
+        ParseContext parseContext = new ParseContext();
+        parseContext.set(Parser.class, context.get(Parser.class));
+
+        TesseractOCRConfig ocrConfig = context.get(TesseractOCRConfig.class);
+        if (ocrConfig != null) {
+            parseContext.set(TesseractOCRConfig.class, ocrConfig);
+        }
+
+        if (password != null) {
+            parseContext.set(PasswordProvider.class, metadata -> password);
+        }
+
+        return parseContext;
+    }
+
+    private static ExtractResult classifyFailure(Exception e) {
+        return causedBy(e, EncryptedDocumentException.class) ? ExtractResult.encrypted(e) : ExtractResult.failed(e);
+    }
+
+    private static boolean causedBy(Throwable throwable, Class<? extends Throwable> type) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (type.isInstance(current)) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    static synchronized LanguageDetector langDetector() {
+        if (detector == null) {
+            try {
+                detector = LanguageDetector.getDefaultLanguageDetector();
+                detector.loadModels();
+            } catch (IOException e) {
+                logger.warn("Can not load lang detector models", e);
+            }
+        }
+        return detector;
+    }
+}

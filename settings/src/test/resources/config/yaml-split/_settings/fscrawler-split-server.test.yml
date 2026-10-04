@@ -1,0 +1,14 @@
+# deprecated: use fs.provider plus fs.providers.ssh / fs.providers.ftp instead of this top-level server block
+server:
+  # optional: hostname, defaults to "localhost"
+  hostname: "localhost"
+  # optional: port, defaults to 22
+  port: 22
+  # optional: username
+  username: "dadoonet"
+  # optional: password
+  password: "password"
+  # optional: protocol, either "ssh" or "local"
+  protocol: "ssh"
+  # optional: path to the private key
+  pem_path: "/path/to/pemfile"

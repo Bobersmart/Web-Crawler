@@ -1,0 +1,83 @@
+/*
+ * Licensed to David Pilato (the "Author") under one
+ * or more contributor license agreements. See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership. Author licenses this
+ * file to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ * Made from 🇫🇷🇪🇺 with ❤️ - 2011-2026
+ */
+package fr.pilato.elasticsearch.crawler.fs.tika;
+
+import fr.pilato.elasticsearch.crawler.fs.framework.FsCrawlerSerializationException;
+import fr.pilato.elasticsearch.crawler.fs.framework.JsonUtil;
+import java.io.InputStream;
+import java.util.Map;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.dataformat.xml.XmlMapper;
+
+/** Parse a XML document and generate a FSCrawler Doc */
+@SuppressWarnings("unchecked")
+public class XmlDocParser {
+
+    private XmlDocParser() {
+        // Utility class, do not instantiate
+    }
+
+    private static final Logger logger = LogManager.getLogger();
+    private static final ObjectMapper xmlMapper;
+
+    static {
+        xmlMapper = XmlMapper.builder().nameForTextElement("$").build();
+    }
+
+    public static String generate(InputStream inputStream) {
+        logger.trace("Converting XML document");
+        // Extracting XML content
+        // See #185: https://github.com/dadoonet/fscrawler/issues/185
+
+        Map<String, Object> map = generateMap(inputStream);
+
+        // Serialize to JSON
+        String json = JsonUtil.mapper.writeValueAsString(map);
+        logger.trace("Generated JSON: {}", json);
+        return json;
+    }
+
+    /**
+     * Extracting XML content. See #185: <a
+     * href="https://github.com/dadoonet/fscrawler/issues/185">https://github.com/dadoonet/fscrawler/issues/185</a>
+     *
+     * @param inputStream The XML Stream
+     * @return The XML Content as a map
+     */
+    public static Map<String, Object> generateMap(InputStream inputStream) {
+        logger.trace("Converting XML document");
+        Map<String, Object> map = asMap(inputStream);
+
+        logger.trace("Generated JSON: {}", map);
+        return map;
+    }
+
+    private static Map<String, Object> asMap(InputStream stream) {
+        try {
+            return (Map<String, Object>) xmlMapper.readValue(stream, Object.class);
+        } catch (JacksonException e) {
+            throw new FsCrawlerSerializationException(e);
+        }
+    }
+}
